@@ -23,8 +23,12 @@ struct ImageOperands {
         operands.push_back(value2);
     }
 
+    /// `can_use_runtime_offsets` is only true for gather instructions: SPIR-V restricts the
+    /// dynamic `Offset` operand to OpImageGather/OpImageDrefGather. `folded` signals that the
+    /// caller already folded the offset into the coordinates, so no operand is emitted and
+    /// no warning is due.
     void AddOffset(EmitContext& ctx, const IR::Value& offset,
-                   bool can_use_runtime_offsets = false) {
+                   bool can_use_runtime_offsets = false, bool folded = false) {
         if (offset.IsEmpty()) {
             return;
         }
@@ -53,7 +57,7 @@ struct ImageOperands {
         }
         if (can_use_runtime_offsets) {
             Add(spv::ImageOperandsMask::Offset, ctx.Def(offset));
-        } else {
+        } else if (!folded) {
             LOG_WARNING(Render_Vulkan,
                         "Runtime offset provided to unsupported image sample instruction");
         }
@@ -70,6 +74,45 @@ struct ImageOperands {
     boost::container::static_vector<Id, 4> operands;
 };
 
+/// Folds a runtime (non-constant) texel offset into normalized sample coordinates.
+///
+/// SPIR-V only permits the dynamic `Offset` image operand on OpImageGather and
+/// OpImageDrefGather; for the OpImageSample* family only `ConstOffset` is legal. Rather
+/// than dropping such offsets we approximate them as
+///     coords += float(offset) / float(textureSize)
+/// This differs from a true ConstOffset at texture borders (applied before address
+/// wrapping rather than after) but matches for interior texels, which is what
+/// post-process and blur shaders sample.
+///
+/// Returns an invalid Id when the offset cannot be folded; callers then fall through to
+/// the existing warning path.
+static Id FoldRuntimeOffset(EmitContext& ctx, const EmitContext::TextureDefinition& texture,
+                            Id image, Id coords, const IR::Value& offset) {
+    if (offset.IsEmpty() || offset.IsImmediate()) {
+        return Id{};
+    }
+    if (const IR::Inst* const inst = offset.InstRecursive();
+        inst != nullptr && inst->AreAllArgsImmediates()) {
+        // Constant offsets are already handled by AddOffset via ConstOffset.
+        return Id{};
+    }
+    // Only plain 2D sampling for now: array/3D/cube coordinates carry a layer or depth
+    // component that this vector add would clobber.
+    if (texture.view_type != AmdGpu::ImageType::Color2D) {
+        return Id{};
+    }
+    // NOTE: OpImageQuerySizeLod requires the ImageQuery capability, which is only declared
+    // when `info.has_image_query` is set (see emit_spirv.cpp). A shader reaching this path
+    // without an existing size query will otherwise fail SPIR-V validation.
+    const Id size_u32 = ctx.OpImageQuerySizeLod(ctx.U32[2], image, ctx.u32_zero_value);
+    const Id size_f32 = ctx.OpConvertUToF(ctx.F32[2], size_u32);
+    // The IR carries the texel offset as u32 holding a signed value.
+    const Id offset_s32 = ctx.OpBitcast(ctx.S32[2], ctx.Def(offset));
+    const Id offset_f32 = ctx.OpConvertSToF(ctx.F32[2], offset_s32);
+    const Id normalized = ctx.OpFDiv(ctx.F32[2], offset_f32, size_f32);
+    return ctx.OpFAdd(ctx.F32[2], coords, normalized);
+}
+
 Id EmitImageSampleRaw(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address1, Id address2,
                       Id address3, Id address4) {
     UNREACHABLE_MSG("Unreachable instruction");
@@ -82,9 +125,15 @@ Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
     const Id result_type = texture.data_types->Get(4);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
     const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    bool folded = false;
+    if (const Id adjusted = FoldRuntimeOffset(ctx, texture, image, coords, offset);
+        Sirit::ValidId(adjusted)) {
+        coords = adjusted;
+        folded = true;
+    }
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Bias, bias);
-    operands.AddOffset(ctx, offset);
+    operands.AddOffset(ctx, offset, false, folded);
     const Id sample = ctx.OpImageSampleImplicitLod(result_type, sampled_image, coords,
                                                    operands.mask, operands.operands);
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
@@ -97,9 +146,15 @@ Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
     const Id result_type = texture.data_types->Get(4);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
     const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    bool folded = false;
+    if (const Id adjusted = FoldRuntimeOffset(ctx, texture, image, coords, offset);
+        Sirit::ValidId(adjusted)) {
+        coords = adjusted;
+        folded = true;
+    }
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Lod, lod);
-    operands.AddOffset(ctx, offset);
+    operands.AddOffset(ctx, offset, false, folded);
     const Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
                                                    operands.mask, operands.operands);
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
@@ -112,9 +167,15 @@ Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, 
     const Id result_type = texture.data_types->Get(1);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
     const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    bool folded = false;
+    if (const Id adjusted = FoldRuntimeOffset(ctx, texture, image, coords, offset);
+        Sirit::ValidId(adjusted)) {
+        coords = adjusted;
+        folded = true;
+    }
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Bias, bias);
-    operands.AddOffset(ctx, offset);
+    operands.AddOffset(ctx, offset, false, folded);
     const Id sample = ctx.OpImageSampleDrefImplicitLod(result_type, sampled_image, coords, dref,
                                                        operands.mask, operands.operands);
     const Id sample_typed = texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
@@ -129,9 +190,15 @@ Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, 
     const Id result_type = texture.data_types->Get(1);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
     const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    bool folded = false;
+    if (const Id adjusted = FoldRuntimeOffset(ctx, texture, image, coords, offset);
+        Sirit::ValidId(adjusted)) {
+        coords = adjusted;
+        folded = true;
+    }
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Lod, lod);
-    operands.AddOffset(ctx, offset);
+    operands.AddOffset(ctx, offset, false, folded);
     const Id sample = ctx.OpImageSampleDrefExplicitLod(result_type, sampled_image, coords, dref,
                                                        operands.mask, operands.operands);
     const Id sample_typed = texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
@@ -210,9 +277,15 @@ Id EmitImageGradient(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id
     const Id result_type = texture.data_types->Get(4);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
     const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    bool folded = false;
+    if (const Id adjusted = FoldRuntimeOffset(ctx, texture, image, coords, offset);
+        Sirit::ValidId(adjusted)) {
+        coords = adjusted;
+        folded = true;
+    }
     ImageOperands operands;
     operands.AddDerivatives(ctx, derivatives_dx, derivatives_dy);
-    operands.AddOffset(ctx, offset);
+    operands.AddOffset(ctx, offset, false, folded);
     const Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, coords,
                                                    operands.mask, operands.operands);
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
