@@ -27,8 +27,8 @@ struct ImageOperands {
     /// dynamic `Offset` operand to OpImageGather/OpImageDrefGather. `folded` signals that the
     /// caller already folded the offset into the coordinates, so no operand is emitted and
     /// no warning is due.
-    void AddOffset(EmitContext& ctx, const IR::Value& offset,
-                   bool can_use_runtime_offsets = false, bool folded = false) {
+    void AddOffset(EmitContext& ctx, const IR::Value& offset, bool can_use_runtime_offsets = false,
+                   bool folded = false) {
         if (offset.IsEmpty()) {
             return;
         }
