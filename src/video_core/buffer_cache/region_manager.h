@@ -123,11 +123,33 @@ public:
         RegionBits mask(bits, start_page, end_page);
 
         if constexpr (clear) {
-            bits.UnsetRange(start_page, end_page);
             if constexpr (type == Type::CPU) {
-                UpdateProtection<true, false>();
-            } else if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
-                UpdateProtection<false, true>();
+                // Clearing the CPU bits re-protects the pages, so the next guest write to this
+                // region faults again. For a region the guest rewrites every frame - streaming
+                // vertex and instance buffers, for example - that produces one fault per upload
+                // cycle, forever. Widening the fault granule does nothing against this: the
+                // faults repeat in time, not in space.
+                //
+                // On Windows each of those faults destroys up to 128 bytes of the guest's
+                // System V red zone (see page_manager.cpp), so a hot region is a permanent
+                // source of guest state corruption.
+                //
+                // Once a region has gone through enough upload cycles, stop clearing its CPU
+                // bits: the pages stay writable and never fault again. The region then always
+                // looks CPU-modified, so it is re-uploaded on every use. That costs bandwidth
+                // but is the safe direction - the GPU can never observe stale CPU data.
+                if (cpu_clear_cycles < StickyCpuThreshold) {
+                    ++cpu_clear_cycles;
+                }
+                if (cpu_clear_cycles < StickyCpuThreshold) {
+                    bits.UnsetRange(start_page, end_page);
+                    UpdateProtection<true, false>();
+                }
+            } else {
+                bits.UnsetRange(start_page, end_page);
+                if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
+                    UpdateProtection<false, true>();
+                }
             }
         }
 
@@ -184,8 +206,14 @@ private:
         tracker->UpdatePageWatchersForRegion<track, is_read>(cpu_addr, mask);
     }
 
+    /// Number of upload cycles after which a region stops being re-protected for CPU writes.
+    /// Low enough that hot streaming buffers settle quickly, high enough that a region touched
+    /// once or twice keeps exact tracking.
+    static constexpr u32 StickyCpuThreshold = 8;
+
     PageManager* tracker;
     VAddr cpu_addr = 0;
+    u32 cpu_clear_cycles = 0;
     RegionBits cpu;
     RegionBits gpu;
     RegionBits writeable;
