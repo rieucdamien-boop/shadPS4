@@ -4,6 +4,7 @@
 #include "common/arch.h"
 #include "common/assert.h"
 #include "common/decoder.h"
+#include "common/logging/log.h"
 #include "common/signal_context.h"
 #include "core/libraries/kernel/threads/exception.h"
 #include "core/signals.h"
@@ -112,6 +113,12 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     // Breakpoints almost certainly come from our asserts/unreachables, no need to log it again.
     if (code != EXCEPTION_BREAKPOINT) {
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+        // Flush before anything else. Emulator::Shutdown() only flushes on its first call
+        // (it early-returns once exit_done is set), so any earlier non-fatal exception -
+        // a C++ exception at 0xe06d7363, for instance - permanently disables the flush for
+        // every crash that follows. The line above would then never reach the file and the
+        // log would simply end mid-write, which is exactly what CUSA00049 looked like.
+        Common::Log::Flush();
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
 
