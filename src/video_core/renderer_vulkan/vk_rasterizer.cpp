@@ -8,6 +8,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/region_definitions.h"
+#include "video_core/buffer_cache/region_manager.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -1070,6 +1071,10 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size) {
 static constexpr u64 WideFaultGranule = VideoCore::TRACKER_HIGHER_PAGE_SIZE;
 
 bool Rasterizer::InvalidateMemoryFromCpuFault(VAddr addr) {
+    // This region just cost the guest a fault, so stop re-protecting it from now on. Setting
+    // a flag in a lock-free table is the only extra work allowed here: this runs inside the
+    // guest page-fault handler, in the middle of a guest instruction.
+    VideoCore::StickyRegions::MarkFaulted(addr);
     // This runs inside the guest page-fault handler, in the middle of a guest instruction.
     // It must stay as cheap as the original narrow invalidation: querying cache state or
     // triggering GPU synchronisation here can deadlock against a fault raised from inside the
