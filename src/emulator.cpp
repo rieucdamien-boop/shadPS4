@@ -684,7 +684,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
                                      std::chrono::steady_clock::now() - started)
                                      .count();
             LOG_WARNING(Debug, "Heartbeat #{} t={}ms flip={} gnm={}", ++tick, elapsed,
-                        DebugState.flip_frame_count.load(), DebugState.gnm_frame_count.load());
+                        DebugState.GetFrameNum(), DebugState.GetGnmFrameNum());
         }
     });
 
