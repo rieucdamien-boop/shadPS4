@@ -217,21 +217,14 @@ struct PageManager::Impl {
     // a vmovaps copy loop, corrupts the pointer the same function stored at [rsp-0x20] and
     // reloads 44 bytes later at 0x8012d6ca0, crashing at 0x8012d6ca5.
     //
-    // Since the clobber itself is unavoidable, minimise how often it can happen: one fault
-    // now clears a whole 64 KiB span instead of a single 4 KiB page, cutting the fault count
-    // for large sequential guest writes by roughly 16x. Over-invalidating is the safe
-    // direction - it costs redundant uploads, never stale data. Falls back to the original
-    // narrow granule if the wide span is not fully GPU-mapped.
-    static constexpr u64 WriteFaultGranule = 64_KB;
+    // Since the clobber itself is unavoidable, minimise how often it can happen:
+    // InvalidateMemoryFromCpuFault widens the invalidation across buffer memory the GPU has
+    // not written, collapsing long runs of sequential guest writes into a single fault.
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
         if (Common::IsWriteError(context)) {
-            const VAddr base = Common::AlignDown(addr, WriteFaultGranule);
-            if (rasterizer->InvalidateMemory(base, WriteFaultGranule)) {
-                return true;
-            }
-            return rasterizer->InvalidateMemory(addr, 8);
+            return rasterizer->InvalidateMemoryFromCpuFault(addr);
         } else {
             return rasterizer->ReadMemory(addr, 8);
         }
