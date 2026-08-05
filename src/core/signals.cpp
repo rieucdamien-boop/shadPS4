@@ -132,6 +132,15 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
                 LOG_CRITICAL(Debug, "  [rsp-{:#05x}] {:#018x}   [rsp-{:#05x}] {:#018x}",
                              128 - i * 8, red[i], 128 - (i + 1) * 8, red[i + 1]);
             }
+            // Also dump above RSP. A faulting leaf function pushes nothing, so the caller's
+            // frame starts immediately here: the same values the crashing function received
+            // as arguments are still visible in the caller's own locals. Comparing the two
+            // says whether a pointer arrived corrupted or was corrupted after being stored.
+            const auto* up = reinterpret_cast<const u64*>(ctx->Rsp);
+            for (u32 i = 0; i < 16; i += 2) {
+                LOG_CRITICAL(Debug, "  [rsp+{:#05x}] {:#018x}   [rsp+{:#05x}] {:#018x}", i * 8,
+                             up[i], (i + 1) * 8, up[i + 1]);
+            }
         }
         // Flush before anything else. Emulator::Shutdown() only flushes on its first call
         // (it early-returns once exit_done is set), so any earlier non-fatal exception -
