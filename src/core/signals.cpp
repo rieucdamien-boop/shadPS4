@@ -113,6 +113,26 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     // Breakpoints almost certainly come from our asserts/unreachables, no need to log it again.
     if (code != EXCEPTION_BREAKPOINT) {
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+        // Dump enough state to identify what corrupted the guest.
+        //
+        // The System V ABI lets guest leaf functions keep live data in the 128 bytes below RSP
+        // (the red zone). Windows has no red zone and writes exception frames there, so any
+        // handled fault taken while such a function is running destroys that data. Printing
+        // the registers and the red zone at the moment of the fatal fault says whether that is
+        // what actually happened here, or whether the corruption comes from somewhere else.
+        if (code == EXCEPTION_ACCESS_VIOLATION && pExp != nullptr &&
+            pExp->ContextRecord != nullptr) {
+            const auto* ctx = pExp->ContextRecord;
+            LOG_CRITICAL(Debug, "  rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}", ctx->Rax,
+                         ctx->Rbx, ctx->Rcx, ctx->Rdx);
+            LOG_CRITICAL(Debug, "  rsi={:#018x} rdi={:#018x} rbp={:#018x} rsp={:#018x}", ctx->Rsi,
+                         ctx->Rdi, ctx->Rbp, ctx->Rsp);
+            const auto* red = reinterpret_cast<const u64*>(ctx->Rsp - 128);
+            for (u32 i = 0; i < 16; i += 2) {
+                LOG_CRITICAL(Debug, "  [rsp-{:#05x}] {:#018x}   [rsp-{:#05x}] {:#018x}",
+                             128 - i * 8, red[i], 128 - (i + 1) * 8, red[i + 1]);
+            }
+        }
         // Flush before anything else. Emulator::Shutdown() only flushes on its first call
         // (it early-returns once exit_done is set), so any earlier non-fatal exception -
         // a C++ exception at 0xe06d7363, for instance - permanently disables the flush for
