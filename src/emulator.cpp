@@ -14,6 +14,7 @@
 #include "common/logging/log.h"
 #include "common/string_util.h"
 #include "common/thread.h"
+#include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/ipc/ipc.h"
 #ifdef ENABLE_DISCORD_RPC
@@ -662,6 +663,30 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
             }
         });
     }
+
+    // Liveness heartbeat.
+    //
+    // Several failure modes end with the log simply stopping mid-line and no exception being
+    // recorded, which makes it impossible to tell a hang from the process being killed. This
+    // thread ticks independently of the guest and of the GPU, and reports the two frame
+    // counters, so the last heartbeat before the log ends distinguishes them:
+    //
+    //   - heartbeats stop abruptly            -> the process died (killed or hard crash)
+    //   - heartbeats continue, flip stalls    -> presentation is stuck
+    //   - heartbeats continue, gnm stalls     -> the GPU command processor is stuck
+    //   - both counters advance to the end    -> the guest stopped submitting work
+    heartbeat_thread = std::jthread([](std::stop_token stop) {
+        Common::SetCurrentThreadName("shadPS4:Heartbeat");
+        const auto started = std::chrono::steady_clock::now();
+        u64 tick = 0;
+        while (Common::StoppableTimedWait(stop, std::chrono::seconds(2))) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count();
+            LOG_WARNING(Debug, "Heartbeat #{} t={}ms flip={} gnm={}", ++tick, elapsed,
+                        DebugState.flip_frame_count.load(), DebugState.gnm_frame_count.load());
+        }
+    });
 
     linker->Execute(args);
 
