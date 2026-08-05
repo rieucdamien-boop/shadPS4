@@ -69,11 +69,15 @@ static void ProbeRedZone(const EXCEPTION_POINTERS* pExp) {
     // prologue dereferences it at 0x8012d68d1) and the caller's own copy is still intact at the
     // moment of the crash, so something destroys the red-zone copy in between. Logging it on
     // every fault taken inside that function shows exactly which fault does it.
-    static constexpr u64 WatchLo = 0x8012d68c0;
-    static constexpr u64 WatchHi = 0x8012d6d00;
+    // Window narrowed to the span where the pointer is live: from just after the store at
+    // 0x8012d6a3e to the reload at 0x8012d6ca0. A previous attempt watched the whole function
+    // and burned its entire logging budget on the hot loop at 0x8012d6929, which runs *before*
+    // the store and therefore says nothing about the corruption.
+    static constexpr u64 WatchLo = 0x8012d6a43;
+    static constexpr u64 WatchHi = 0x8012d6ca5;
     static std::atomic<u32> watch_count{0};
     if (rip >= WatchLo && rip < WatchHi &&
-        watch_count.fetch_add(1, std::memory_order_relaxed) < 400) {
+        watch_count.fetch_add(1, std::memory_order_relaxed) < 2000) {
         const auto* rz = reinterpret_cast<const u64*>(rsp);
         LOG_WARNING(Debug,
                     "RedZoneWatch: fault at rip={:#x} rsp={:#x}  [rsp-0x20]={:#018x} "
