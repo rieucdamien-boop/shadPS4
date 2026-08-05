@@ -7,6 +7,7 @@
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/region_definitions.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -1058,11 +1059,15 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size) {
     return true;
 }
 
-// Granule used to widen a CPU write fault. See the red zone comment in page_manager.cpp:
-// on Windows every guest page fault destroys the guest's System V red zone, so the fewer
-// faults we take, the fewer chances there are to corrupt guest state. Collapsing a long run
-// of sequential guest writes into a single fault is currently the only lever we have.
-static constexpr u64 WideFaultGranule = 256_KB;
+// Widen a CPU write fault to exactly one memory-tracker region, region-aligned.
+//
+// See the red zone comment in page_manager.cpp: on Windows every guest page fault destroys the
+// guest's System V red zone, so the fewer faults we take, the fewer chances there are to corrupt
+// guest state. Matching the tracker's own region size is the principled choice: it is also the
+// lock granularity (PAGES_PER_LOCK == NUM_PAGES_PER_REGION in page_manager.h), so a region-aligned
+// invalidation touches exactly one lock instead of straddling several, and a long sequential guest
+// write collapses into a single fault per region instead of one per arbitrary sub-slice.
+static constexpr u64 WideFaultGranule = VideoCore::TRACKER_HIGHER_PAGE_SIZE;
 
 bool Rasterizer::InvalidateMemoryFromCpuFault(VAddr addr) {
     // This runs inside the guest page-fault handler, in the middle of a guest instruction.
