@@ -10,6 +10,8 @@
 #include "emulator.h"
 
 #ifdef _WIN32
+#include <mutex>
+#include <unordered_set>
 #include <windows.h>
 static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
 #else
@@ -31,6 +33,45 @@ namespace Core {
 
 #if defined(_WIN32)
 
+// ---------------------------------------------------------------------------
+// RED ZONE PROBE (diagnostic build only)
+//
+// The System V ABI the guest is compiled for reserves 128 bytes below RSP - the
+// "red zone" - which leaf functions may use for locals without adjusting RSP.
+// Windows has no red zone: when a fault occurs, the kernel writes the CONTEXT
+// and EXCEPTION_RECORD immediately below RSP, destroying whatever the guest had
+// stored there. Because that happens before any of our code runs, the handler
+// cannot save or restore it.
+//
+// This probe records the first occurrence of every guest RIP that takes a
+// *handled* access violation (i.e. one of our memory-tracking faults). If a RIP
+// belonging to a leaf function that keeps live data in its red zone shows up
+// here, that function's locals were silently corrupted.
+//
+// Deduplicated by RIP and capped, so it cannot flood the log.
+// ---------------------------------------------------------------------------
+static void ProbeRedZone(const EXCEPTION_POINTERS* pExp) {
+    static std::mutex probe_mutex;
+    static std::unordered_set<u64> seen_rips;
+    static constexpr size_t MaxDistinctRips = 8192;
+
+    if (pExp == nullptr || pExp->ContextRecord == nullptr || pExp->ExceptionRecord == nullptr) {
+        return;
+    }
+    const u64 rip = pExp->ContextRecord->Rip;
+    const u64 rsp = pExp->ContextRecord->Rsp;
+    {
+        std::scoped_lock lock{probe_mutex};
+        if (seen_rips.size() >= MaxDistinctRips || !seen_rips.insert(rip).second) {
+            return;
+        }
+    }
+    LOG_WARNING(Debug,
+                "RedZoneProbe: handled AV  rip={:#x}  rsp={:#x}  fault_addr={:#x}  is_write={}",
+                rip, rsp, static_cast<u64>(pExp->ExceptionRecord->ExceptionInformation[1]),
+                static_cast<u64>(pExp->ExceptionRecord->ExceptionInformation[0]));
+}
+
 static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     const auto* signals = Signals::Instance();
     DWORD code = 0;
@@ -46,6 +87,9 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     case EXCEPTION_ACCESS_VIOLATION:
         handled = signals->DispatchAccessViolation(
             pExp, reinterpret_cast<void*>(pExp->ExceptionRecord->ExceptionInformation[1]));
+        if (handled) {
+            ProbeRedZone(pExp);
+        }
         break;
     case EXCEPTION_ILLEGAL_INSTRUCTION:
         handled = signals->DispatchIllegalInstruction(pExp);
