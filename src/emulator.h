@@ -49,6 +49,7 @@ private:
     std::unique_ptr<Frontend::WindowSDL> window;
     std::chrono::steady_clock::time_point start_time;
     std::jthread play_time_thread;
+    std::jthread heartbeat_thread;
 };
 
 } // namespace Core
