@@ -208,12 +208,16 @@ private:
 
     /// Number of upload cycles after which a region stops being re-protected for CPU writes.
     ///
-    /// Every cycle before the threshold still takes a fault, and on Windows every fault is a
-    /// chance to destroy the guest's red zone, so this window is pure exposure. A region the
-    /// guest writes twice is already a region it will keep writing; waiting longer buys
-    /// nothing but risk. Set to 2 so a hot region goes sticky almost immediately, while a
-    /// region touched exactly once still keeps exact tracking and costs no extra bandwidth.
-    static constexpr u32 StickyCpuThreshold = 2;
+    /// This is a trade-off with a real optimum, measured on CUSA00049 (Battlefield 4):
+    ///   - no stickiness: ~8k faults, mission loads but crashes during it
+    ///   - threshold 8:   ~8k faults, mission loads and is playable, 923 shaders compiled
+    ///   - threshold 2:   ~2k faults, but the mission no longer loads at all
+    ///
+    /// Lowering it does reduce faults, but it flips far more memory into permanent
+    /// re-upload and the resulting bandwidth cost is worse than the corruption it avoids.
+    /// Fewer faults is not the objective on its own. 8 is the best value measured so far;
+    /// higher values have not been tried.
+    static constexpr u32 StickyCpuThreshold = 8;
 
     PageManager* tracker;
     VAddr cpu_addr = 0;
