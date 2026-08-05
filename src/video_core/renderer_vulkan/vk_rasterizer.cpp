@@ -1058,6 +1058,30 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size) {
     return true;
 }
 
+// Granule used to opportunistically widen a CPU write fault. See the red zone comment in
+// page_manager.cpp: on Windows every fault destroys the guest's System V red zone, so the
+// fewer faults we take, the fewer chances there are to corrupt guest state.
+static constexpr u64 WideFaultGranule = 256_KB;
+
+bool Rasterizer::InvalidateMemoryFromCpuFault(VAddr addr) {
+    // Always perform the exact, narrow invalidation first - this is the upstream behaviour
+    // and it is what guarantees correctness.
+    if (!InvalidateMemory(addr, 8)) {
+        return false;
+    }
+    // Then widen, but only across buffer memory the GPU has not written. Marking a region as
+    // CPU-modified makes the CPU copy authoritative, so blindly widening would discard
+    // GPU-produced results and cause flickering. Restricting the widening to regions that are
+    // not GPU-modified keeps it lossless while still collapsing long runs of sequential guest
+    // writes into a single fault.
+    const VAddr base = Common::AlignDown(addr, WideFaultGranule);
+    if (IsMapped(base, WideFaultGranule) &&
+        !buffer_cache.IsRegionGpuModified(base, WideFaultGranule)) {
+        buffer_cache.InvalidateMemory(base, WideFaultGranule);
+    }
+    return true;
+}
+
 bool Rasterizer::ReadMemory(VAddr addr, u64 size) {
     if (!IsMapped(addr, size)) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
