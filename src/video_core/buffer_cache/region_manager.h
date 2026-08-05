@@ -51,6 +51,17 @@ public:
         return counters[Index(region_addr)].load(std::memory_order_relaxed) >= Threshold;
     }
 
+    /// Marks a region as sticky immediately.
+    ///
+    /// Called from the guest page-fault handler. A region that has faulted once is a region
+    /// the guest is actively writing, so it will fault again; on Windows every one of those
+    /// faults costs the guest up to 128 bytes of red zone. Waiting for further cycles buys
+    /// nothing and pays that price each time. The upload-cycle counter below still covers
+    /// regions that go hot without ever faulting.
+    static void MarkFaulted(VAddr region_addr) {
+        counters[Index(region_addr)].store(Threshold, std::memory_order_relaxed);
+    }
+
     /// Records one upload cycle for this region. Returns true once it has gone sticky.
     static bool Touch(VAddr region_addr) {
         auto& slot = counters[Index(region_addr)];
