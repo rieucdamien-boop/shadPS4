@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
 #include "common/div_ceil.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -29,6 +31,45 @@ using LockType = Common::SpinLock;
  * Allows tracking CPU and GPU modification of pages in a contigious 16MB virtual address region.
  * Information is stored in bitsets for spacial locality and fast update of single pages.
  */
+/// Regions whose CPU bits have stopped being cleared, keyed by address rather than by
+/// RegionManager instance.
+///
+/// The per-instance counter this replaces was useless in practice: the buffer cache creates
+/// and destroys RegionManagers as the guest allocates and frees streaming buffers, so a
+/// region that the guest rewrites every frame kept getting a fresh counter and never reached
+/// the threshold. Keying on the address makes the decision survive that churn.
+///
+/// Hashed into a fixed table, so distinct regions can collide. A collision only makes an
+/// extra region sticky, which costs upload bandwidth and never correctness.
+class StickyRegions {
+    static constexpr size_t TableBits = 16;
+    static constexpr size_t TableSize = 1ULL << TableBits;
+    static constexpr u32 Threshold = 8;
+
+public:
+    static bool IsSticky(VAddr region_addr) {
+        return counters[Index(region_addr)].load(std::memory_order_relaxed) >= Threshold;
+    }
+
+    /// Records one upload cycle for this region. Returns true once it has gone sticky.
+    static bool Touch(VAddr region_addr) {
+        auto& slot = counters[Index(region_addr)];
+        const u32 n = slot.load(std::memory_order_relaxed);
+        if (n >= Threshold) {
+            return true;
+        }
+        slot.store(n + 1, std::memory_order_relaxed);
+        return n + 1 >= Threshold;
+    }
+
+private:
+    static size_t Index(VAddr region_addr) {
+        return (region_addr >> TRACKER_HIGHER_PAGE_BITS) & (TableSize - 1);
+    }
+
+    static inline std::array<std::atomic<u32>, TableSize> counters{};
+};
+
 class RegionManager {
 public:
     explicit RegionManager(PageManager* tracker_, VAddr cpu_addr_)
@@ -138,10 +179,7 @@ public:
                 // bits: the pages stay writable and never fault again. The region then always
                 // looks CPU-modified, so it is re-uploaded on every use. That costs bandwidth
                 // but is the safe direction - the GPU can never observe stale CPU data.
-                if (cpu_clear_cycles < StickyCpuThreshold) {
-                    ++cpu_clear_cycles;
-                }
-                if (cpu_clear_cycles < StickyCpuThreshold) {
+                if (!StickyRegions::Touch(cpu_addr)) {
                     bits.UnsetRange(start_page, end_page);
                     UpdateProtection<true, false>();
                 }
@@ -206,22 +244,8 @@ private:
         tracker->UpdatePageWatchersForRegion<track, is_read>(cpu_addr, mask);
     }
 
-    /// Number of upload cycles after which a region stops being re-protected for CPU writes.
-    ///
-    /// This is a trade-off with a real optimum, measured on CUSA00049 (Battlefield 4):
-    ///   - no stickiness: ~8k faults, mission loads but crashes during it
-    ///   - threshold 8:   ~8k faults, mission loads and is playable, 923 shaders compiled
-    ///   - threshold 2:   ~2k faults, but the mission no longer loads at all
-    ///
-    /// Lowering it does reduce faults, but it flips far more memory into permanent
-    /// re-upload and the resulting bandwidth cost is worse than the corruption it avoids.
-    /// Fewer faults is not the objective on its own. 8 is the best value measured so far;
-    /// higher values have not been tried.
-    static constexpr u32 StickyCpuThreshold = 8;
-
     PageManager* tracker;
     VAddr cpu_addr = 0;
-    u32 cpu_clear_cycles = 0;
     RegionBits cpu;
     RegionBits gpu;
     RegionBits writeable;
