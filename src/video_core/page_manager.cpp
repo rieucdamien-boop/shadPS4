@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <boost/container/small_vector.hpp>
 #include "common/assert.h"
 #include "common/debug.h"
@@ -221,9 +222,23 @@ struct PageManager::Impl {
     // InvalidateMemoryFromCpuFault widens the invalidation across buffer memory the GPU has
     // not written, collapsing long runs of sequential guest writes into a single fault.
 
+    // Total number of handled guest write faults. Each one costs the guest up to 128 bytes of
+    // red zone, so this is the quantity we are actually trying to drive down. The earlier
+    // per-RIP probe deduplicated by address and could not measure it. Logged on a power-of-two
+    // schedule so it stays cheap and bounded.
+    static inline std::atomic<u64> write_fault_count{0};
+
+    static void CountWriteFault() {
+        const u64 n = write_fault_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n >= 1024 && (n & (n - 1)) == 0) {
+            LOG_WARNING(Debug, "RedZoneProbe: {} handled guest write faults so far", n);
+        }
+    }
+
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
         if (Common::IsWriteError(context)) {
+            CountWriteFault();
             return rasterizer->InvalidateMemoryFromCpuFault(addr);
         } else {
             return rasterizer->ReadMemory(addr, 8);
