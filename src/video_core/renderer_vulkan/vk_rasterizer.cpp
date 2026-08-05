@@ -1058,28 +1058,23 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size) {
     return true;
 }
 
-// Granule used to opportunistically widen a CPU write fault. See the red zone comment in
-// page_manager.cpp: on Windows every fault destroys the guest's System V red zone, so the
-// fewer faults we take, the fewer chances there are to corrupt guest state.
+// Granule used to widen a CPU write fault. See the red zone comment in page_manager.cpp:
+// on Windows every guest page fault destroys the guest's System V red zone, so the fewer
+// faults we take, the fewer chances there are to corrupt guest state. Collapsing a long run
+// of sequential guest writes into a single fault is currently the only lever we have.
 static constexpr u64 WideFaultGranule = 256_KB;
 
 bool Rasterizer::InvalidateMemoryFromCpuFault(VAddr addr) {
-    // Always perform the exact, narrow invalidation first - this is the upstream behaviour
-    // and it is what guarantees correctness.
-    if (!InvalidateMemory(addr, 8)) {
-        return false;
-    }
-    // Then widen, but only across buffer memory the GPU has not written. Marking a region as
-    // CPU-modified makes the CPU copy authoritative, so blindly widening would discard
-    // GPU-produced results and cause flickering. Restricting the widening to regions that are
-    // not GPU-modified keeps it lossless while still collapsing long runs of sequential guest
-    // writes into a single fault.
+    // This runs inside the guest page-fault handler, in the middle of a guest instruction.
+    // It must stay as cheap as the original narrow invalidation: querying cache state or
+    // triggering GPU synchronisation here can deadlock against a fault raised from inside the
+    // buffer cache itself. Widen unconditionally, and fall back to the exact range when the
+    // wide span is not fully GPU-mapped.
     const VAddr base = Common::AlignDown(addr, WideFaultGranule);
-    if (IsMapped(base, WideFaultGranule) &&
-        !buffer_cache.IsRegionGpuModified(base, WideFaultGranule)) {
-        buffer_cache.InvalidateMemory(base, WideFaultGranule);
+    if (InvalidateMemory(base, WideFaultGranule)) {
+        return true;
     }
-    return true;
+    return InvalidateMemory(addr, 8);
 }
 
 bool Rasterizer::ReadMemory(VAddr addr, u64 size) {
