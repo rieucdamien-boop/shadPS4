@@ -61,6 +61,25 @@ static void ProbeRedZone(const EXCEPTION_POINTERS* pExp) {
     }
     const u64 rip = pExp->ContextRecord->Rip;
     const u64 rsp = pExp->ContextRecord->Rsp;
+
+    // Watch the red zone of one specific guest function across the faults it takes.
+    //
+    // CUSA00049 stores a pointer at [rsp-0x20] early in the leaf function at 0x8012d68c0 and
+    // reloads it near the end, where it is null. The pointer is provably valid on entry (the
+    // prologue dereferences it at 0x8012d68d1) and the caller's own copy is still intact at the
+    // moment of the crash, so something destroys the red-zone copy in between. Logging it on
+    // every fault taken inside that function shows exactly which fault does it.
+    static constexpr u64 WatchLo = 0x8012d68c0;
+    static constexpr u64 WatchHi = 0x8012d6d00;
+    static std::atomic<u32> watch_count{0};
+    if (rip >= WatchLo && rip < WatchHi &&
+        watch_count.fetch_add(1, std::memory_order_relaxed) < 400) {
+        const auto* rz = reinterpret_cast<const u64*>(rsp);
+        LOG_WARNING(Debug,
+                    "RedZoneWatch: fault at rip={:#x} rsp={:#x}  [rsp-0x20]={:#018x} "
+                    "[rsp-0x18]={:#018x} [rsp-0x10]={:#018x} [rsp-0x08]={:#018x}",
+                    rip, rsp, rz[-4], rz[-3], rz[-2], rz[-1]);
+    }
     {
         std::scoped_lock lock{probe_mutex};
         if (seen_rips.size() >= MaxDistinctRips || !seen_rips.insert(rip).second) {
