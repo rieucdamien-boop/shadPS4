@@ -207,9 +207,13 @@ private:
     }
 
     /// Number of upload cycles after which a region stops being re-protected for CPU writes.
-    /// Low enough that hot streaming buffers settle quickly, high enough that a region touched
-    /// once or twice keeps exact tracking.
-    static constexpr u32 StickyCpuThreshold = 8;
+    ///
+    /// Every cycle before the threshold still takes a fault, and on Windows every fault is a
+    /// chance to destroy the guest's red zone, so this window is pure exposure. A region the
+    /// guest writes twice is already a region it will keep writing; waiting longer buys
+    /// nothing but risk. Set to 2 so a hot region goes sticky almost immediately, while a
+    /// region touched exactly once still keeps exact tracking and costs no extra bandwidth.
+    static constexpr u32 StickyCpuThreshold = 2;
 
     PageManager* tracker;
     VAddr cpu_addr = 0;
