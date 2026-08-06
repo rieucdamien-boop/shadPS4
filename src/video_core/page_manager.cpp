@@ -231,7 +231,7 @@ struct PageManager::Impl {
     static void CountWriteFault() {
         const u64 n = write_fault_count.fetch_add(1, std::memory_order_relaxed) + 1;
         if (n >= 64 && (n & (n - 1)) == 0) {
-            LOG_WARNING(Debug, "RedZoneProbe: {} handled guest write faults so far", n);
+            LOG_WARNING(Debug, "GuestWriteFaults: {} so far", n);
         }
     }
 
