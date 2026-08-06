@@ -930,6 +930,8 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/module.cpp
          src/core/module.h
          src/core/platform.h
+         src/core/fault_helper.cpp
+         src/core/fault_helper.h
          src/core/signals.cpp
          src/core/signals.h
          src/core/thread.cpp
