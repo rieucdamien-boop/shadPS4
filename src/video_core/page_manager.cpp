@@ -8,6 +8,7 @@
 #include "common/div_ceil.h"
 #include "common/range_lock.h"
 #include "common/signal_context.h"
+#include "core/fault_helper.h"
 #include "core/memory.h"
 #include "core/signals.h"
 #include "video_core/page_manager.h"
@@ -185,10 +186,21 @@ struct PageManager::Impl {
     Impl(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
 
-        // Should be called first.
+        // Should be called first. The handler stays registered even when the fault helper is
+        // running: the helper does not invalidate anything itself, it hands the addresses back
+        // and FaultHelper::Drain dispatches them through here.
         constexpr auto priority = std::numeric_limits<u32>::min();
         Core::Signals::Instance()->RegisterAccessViolationHandler(GuestFaultSignalHandler,
                                                                   priority);
+
+        // Try to move guest fault handling out of the faulting thread. While a debugger is
+        // attached the kernel suspends the process and notifies the debugger instead of
+        // dispatching in user mode, so the guest's red zone is never written to. If this fails
+        // we simply keep the vectored handler and its cost to guest state.
+        if (!Core::FaultHelper::Start()) {
+            LOG_WARNING(Render, "Guest faults will be handled on the faulting thread; guest "
+                                "red zone corruption is possible");
+        }
     }
 
     void OnMap(VAddr address, size_t size) {
