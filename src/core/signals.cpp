@@ -83,6 +83,26 @@ static void ProbeRedZone(const EXCEPTION_POINTERS* pExp) {
                     "RedZoneWatch: fault at rip={:#x} rsp={:#x}  [rsp-0x20]={:#018x} "
                     "[rsp-0x18]={:#018x} [rsp-0x10]={:#018x} [rsp-0x08]={:#018x}",
                     rip, rsp, rz[-4], rz[-3], rz[-2], rz[-1]);
+
+        // Arm a hardware write watchpoint on the slot, once, on the first thread that still
+        // holds a plausible pointer there. DR0..DR3 are per-thread and are restored from this
+        // CONTEXT when the handler returns EXCEPTION_CONTINUE_EXECUTION, so setting them here
+        // installs the watchpoint on the guest thread itself. The processor then traps the
+        // very instruction that writes the slot, whoever it belongs to - guest code, emulator
+        // code, or the kernel - which is the one thing static analysis cannot tell us.
+        static std::atomic<bool> trap_armed{false};
+        if (rz[-4] > 0x1000000000ULL && !trap_armed.exchange(true)) {
+            auto* c = pExp->ContextRecord;
+            const u64 slot = rsp - 0x20;
+            c->Dr0 = slot;
+            // L0 enables the breakpoint; bits 16..19 are (LEN0 << 2) | RW0, with RW0=01 for
+            // "data write" and LEN0=11 for eight bytes. The address must be 8-byte aligned.
+            c->Dr7 = (c->Dr7 & ~0xFULL) | 0x1ULL;
+            c->Dr7 = (c->Dr7 & ~(0xFULL << 16)) | (0xDULL << 16);
+            c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+            LOG_CRITICAL(Debug, "RedZoneTrap: armed on {:#x} (value {:#018x}) from rip={:#x}",
+                         slot, rz[-4], rip);
+        }
     }
     {
         std::scoped_lock lock{probe_mutex};
@@ -118,6 +138,24 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     case EXCEPTION_ILLEGAL_INSTRUCTION:
         handled = signals->DispatchIllegalInstruction(pExp);
         break;
+    case EXCEPTION_SINGLE_STEP: {
+        // Hardware watchpoint hit, armed in ProbeRedZone. DR6 bit 0 identifies DR0. The trap
+        // fires after the write retires, so RIP already points at the following instruction.
+        auto* c = pExp->ContextRecord;
+        if (c != nullptr && (c->Dr6 & 0x1ULL) != 0) {
+            const auto* slot = reinterpret_cast<const u64*>(c->Dr0);
+            LOG_CRITICAL(Debug,
+                         "RedZoneTrap: WRITE to {:#x} -> {:#018x}, by instruction just before "
+                         "rip={:#x}  rsp={:#x}",
+                         static_cast<u64>(c->Dr0), *slot, c->Rip, c->Rsp);
+            // Disarm: one witness is enough, and leaving it armed would trap every frame.
+            c->Dr7 = 0;
+            c->Dr6 = 0;
+            c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+            Common::Log::Flush();
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     case DBG_PRINTEXCEPTION_C:
     case DBG_PRINTEXCEPTION_WIDE_C:
         // Used by OutputDebugString functions.
