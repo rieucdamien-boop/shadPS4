@@ -21,6 +21,7 @@ bool IsActive() {
 #else
 
 #include <atomic>
+#include <cstring>
 #include <string>
 #include <windows.h>
 
@@ -30,6 +31,26 @@ bool IsActive() {
 
 namespace Core::FaultHelper {
 namespace {
+
+/// The helper cannot use the emulator's logger - it shares nothing with it - and a failure
+/// there is invisible by definition, because the emulator is frozen while we hold a debug
+/// event. So it keeps its own plain text trace next to the temp directory.
+void Trace(const char* text) {
+    wchar_t dir[MAX_PATH]{};
+    if (GetTempPathW(MAX_PATH, dir) == 0) {
+        return;
+    }
+    const std::wstring path = std::wstring(dir) + L"shadps4-fault-helper.log";
+    const HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                                    OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    DWORD written = 0;
+    WriteFile(file, text, static_cast<DWORD>(strlen(text)), &written, nullptr);
+    WriteFile(file, "\r\n", 2, &written, nullptr);
+    CloseHandle(file);
+}
 
 /// Ring of faults the helper has already made writable and the emulator has yet to record.
 /// Lives in memory shared between the two processes; both sides only ever touch their own end.
@@ -120,6 +141,11 @@ bool Start() {
         Sleep(10);
     }
     LOG_ERROR(Core, "Fault helper: the helper never reported that it attached");
+    // The helper may be attached but stuck. Leaving it there would freeze the emulator for
+    // good, so take it down and carry on with the in-process handler.
+    TerminateProcess(helper_process, 1);
+    CloseHandle(helper_process);
+    helper_process = nullptr;
     return false;
 }
 
@@ -204,6 +230,7 @@ int Run(u32 parent_pid) {
     }
 
     if (!DebugActiveProcess(parent_pid)) {
+        Trace("helper: DebugActiveProcess failed");
         return 1;
     }
     // Never take the emulator down with us, whatever happens here.
@@ -217,6 +244,7 @@ int Run(u32 parent_pid) {
     }
 
     // Tell the emulator we are in place.
+    Trace("helper: attached, entering the debug event loop");
     channel->dropped.store(1, std::memory_order_release);
 
     DEBUG_EVENT event{};
@@ -226,6 +254,14 @@ int Run(u32 parent_pid) {
         case EXCEPTION_DEBUG_EVENT: {
             const auto& record = event.u.Exception.ExceptionRecord;
             const bool first_chance = event.u.Exception.dwFirstChance != 0;
+            // Attaching makes the kernel raise a breakpoint in the debuggee on a thread it
+            // injects for the purpose. Nothing in the emulator expects it, so it has to be
+            // swallowed here; handing it back would take the process down.
+            if (record.ExceptionCode == EXCEPTION_BREAKPOINT ||
+                record.ExceptionCode == EXCEPTION_SINGLE_STEP) {
+                status = DBG_CONTINUE;
+                break;
+            }
             if (record.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && first_chance &&
                 record.NumberParameters >= 2) {
                 const u64 address = static_cast<u64>(record.ExceptionInformation[1]);
