@@ -199,7 +199,7 @@ public:
                     // of waiting for the counters to agree.
                     pinned |= cleared;
                 } else {
-                    pinned |= cleared & seen_twice;
+                    pinned |= cleared;
                 }
                 seen_twice |= cleared & seen_once;
                 seen_once |= cleared;
