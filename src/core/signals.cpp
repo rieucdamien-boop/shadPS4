@@ -42,6 +42,36 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
         address = pExp->ExceptionRecord->ExceptionAddress;
     }
 
+    // Every exception taken while the CPU is running guest code is dangerous, whatever its
+    // kind: Windows writes its records below RSP before any of our code runs, destroying the
+    // 128 bytes of System V red zone that guest leaf functions are entitled to use. Now that
+    // the memory tracker has stopped faulting on hot pages, count what is left and say where
+    // it lands, so the remaining sources can be named rather than guessed at.
+    if (pExp != nullptr && pExp->ContextRecord != nullptr) {
+        static constexpr u64 GuestImageBase = 0x800000000;
+        static constexpr u64 RedZoneFuncLo = 0x8012d68c0;
+        static constexpr u64 RedZoneFuncHi = 0x8012d6ca8;
+        const u64 rip = pExp->ContextRecord->Rip;
+        if (rip >= GuestImageBase) {
+            static volatile LONG64 guest_exceptions = 0;
+            const u64 n = static_cast<u64>(InterlockedIncrement64(&guest_exceptions));
+            if ((n & (n - 1)) == 0) {
+                LOG_WARNING(Debug, "GuestException #{}: code={:#x} rip={:#x}", n,
+                            static_cast<u64>(code), rip);
+            }
+            // CUSA00049 dies at 0x8012d6ca5 on a pointer it kept in the red zone of the leaf
+            // function starting at 0x8012d68c0. Anything that interrupts that function while
+            // it runs is a candidate for having destroyed it.
+            if (rip >= RedZoneFuncLo && rip < RedZoneFuncHi) {
+                static volatile LONG in_window = 0;
+                if (InterlockedIncrement(&in_window) <= 64) {
+                    LOG_CRITICAL(Debug, "RedZoneWindow: exception {:#x} at rip={:#x} rsp={:#x}",
+                                 static_cast<u64>(code), rip, pExp->ContextRecord->Rsp);
+                }
+            }
+        }
+    }
+
     bool handled = false;
     switch (code) {
     case EXCEPTION_ACCESS_VIOLATION:
