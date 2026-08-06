@@ -31,56 +31,6 @@ using LockType = Common::SpinLock;
  * Allows tracking CPU and GPU modification of pages in a contigious 16MB virtual address region.
  * Information is stored in bitsets for spacial locality and fast update of single pages.
  */
-/// Regions whose CPU bits have stopped being cleared, keyed by address rather than by
-/// RegionManager instance.
-///
-/// The per-instance counter this replaces was useless in practice: the buffer cache creates
-/// and destroys RegionManagers as the guest allocates and frees streaming buffers, so a
-/// region that the guest rewrites every frame kept getting a fresh counter and never reached
-/// the threshold. Keying on the address makes the decision survive that churn.
-///
-/// Hashed into a fixed table, so distinct regions can collide. A collision only makes an
-/// extra region sticky, which costs upload bandwidth and never correctness.
-class StickyRegions {
-    static constexpr size_t TableBits = 16;
-    static constexpr size_t TableSize = 1ULL << TableBits;
-    static constexpr u32 Threshold = 8;
-
-public:
-    static bool IsSticky(VAddr region_addr) {
-        return counters[Index(region_addr)].load(std::memory_order_relaxed) >= Threshold;
-    }
-
-    /// Marks a region as sticky immediately.
-    ///
-    /// Called from the guest page-fault handler. A region that has faulted once is a region
-    /// the guest is actively writing, so it will fault again; on Windows every one of those
-    /// faults costs the guest up to 128 bytes of red zone. Waiting for further cycles buys
-    /// nothing and pays that price each time. The upload-cycle counter below still covers
-    /// regions that go hot without ever faulting.
-    static void MarkFaulted(VAddr region_addr) {
-        counters[Index(region_addr)].store(Threshold, std::memory_order_relaxed);
-    }
-
-    /// Records one upload cycle for this region. Returns true once it has gone sticky.
-    static bool Touch(VAddr region_addr) {
-        auto& slot = counters[Index(region_addr)];
-        const u32 n = slot.load(std::memory_order_relaxed);
-        if (n >= Threshold) {
-            return true;
-        }
-        slot.store(n + 1, std::memory_order_relaxed);
-        return n + 1 >= Threshold;
-    }
-
-private:
-    static size_t Index(VAddr region_addr) {
-        return (region_addr >> TRACKER_HIGHER_PAGE_BITS) & (TableSize - 1);
-    }
-
-    static inline std::array<std::atomic<u32>, TableSize> counters{};
-};
-
 class RegionManager {
 public:
     explicit RegionManager(PageManager* tracker_, VAddr cpu_addr_)
@@ -94,6 +44,11 @@ public:
 
     void SetCpuAddress(VAddr new_cpu_addr) {
         cpu_addr = new_cpu_addr;
+        // Managers are pooled and reassigned to new addresses, so the pinning history has to
+        // start over: it describes how the guest treated the previous range, not this one.
+        pinned.Clear();
+        seen_once.Clear();
+        seen_twice.Clear();
     }
 
     VAddr GetCpuAddr() const {
@@ -145,6 +100,12 @@ public:
         } else {
             bits.UnsetRange(start_page, end_page);
         }
+        if constexpr (type == Type::GPU && enable) {
+            // The GPU produces the data in this range, so the CPU copy is no longer
+            // authoritative. Release any pin held on these pages: keeping them permanently
+            // CPU-modified would make every upload overwrite what the GPU just wrote.
+            pinned.UnsetRange(start_page, end_page);
+        }
         if constexpr (type == Type::CPU) {
             UpdateProtection<!enable, false>();
         } else if (EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise) {
@@ -176,24 +137,33 @@ public:
 
         if constexpr (clear) {
             if constexpr (type == Type::CPU) {
-                // Clearing the CPU bits re-protects the pages, so the next guest write to this
-                // region faults again. For a region the guest rewrites every frame - streaming
-                // vertex and instance buffers, for example - that produces one fault per upload
-                // cycle, forever. Widening the fault granule does nothing against this: the
-                // faults repeat in time, not in space.
+                // Clearing the CPU bits re-protects these pages, so the guest's next write to
+                // them faults again. For memory the guest rewrites every frame - streaming
+                // vertex, instance and constant buffers - that is one fault per page per upload
+                // cycle, for the lifetime of the process. Widening the fault granule does
+                // nothing against it: the faults repeat in time, not in space.
                 //
-                // On Windows each of those faults destroys up to 128 bytes of the guest's
-                // System V red zone (see page_manager.cpp), so a hot region is a permanent
-                // source of guest state corruption.
+                // That matters beyond performance. On Windows a guest fault is dispatched on
+                // the guest's own stack and destroys up to 128 bytes of its System V red zone
+                // (see page_manager.cpp), so every avoidable fault is a chance to corrupt guest
+                // state. Faults on hot memory are avoidable.
                 //
-                // Once a region has gone through enough upload cycles, stop clearing its CPU
-                // bits: the pages stay writable and never fault again. The region then always
-                // looks CPU-modified, so it is re-uploaded on every use. That costs bandwidth
-                // but is the safe direction - the GPU can never observe stale CPU data.
-                if (!StickyRegions::Touch(cpu_addr)) {
-                    bits.UnsetRange(start_page, end_page);
-                    UpdateProtection<true, false>();
-                }
+                // A page that is still being cleared on its third upload cycle is one the guest
+                // rewrites continuously. Pin it: leave it writable and permanently
+                // CPU-modified. It is then re-uploaded on every use and never faults again.
+                // Bandwidth is spent, but the GPU can never observe stale CPU data, so this is
+                // the safe direction. Pages the GPU writes are excluded - ChangeRegionState
+                // releases their pin - because there the CPU copy is not authoritative.
+                const RegionBits cleared(bits, start_page, end_page);
+                bits.UnsetRange(start_page, end_page);
+
+                pinned |= cleared & seen_twice;
+                seen_twice |= cleared & seen_once;
+                seen_once |= cleared;
+
+                const RegionBits keep(pinned, start_page, end_page);
+                bits |= keep;
+                UpdateProtection<true, false>();
             } else {
                 bits.UnsetRange(start_page, end_page);
                 if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
@@ -257,6 +227,13 @@ private:
 
     PageManager* tracker;
     VAddr cpu_addr = 0;
+    /// Pages that must stay writable and CPU-modified: the guest rewrites them continuously,
+    /// so protecting them again would only buy another fault.
+    RegionBits pinned;
+    /// Upload cycles in which each page was found CPU-modified, saturating at two. A page that
+    /// reaches a third becomes pinned.
+    RegionBits seen_once;
+    RegionBits seen_twice;
     RegionBits cpu;
     RegionBits gpu;
     RegionBits writeable;
