@@ -4,6 +4,7 @@
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/fault_helper.h"
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -189,6 +190,10 @@ void Rasterizer::EliminateFastClear() {
 }
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
+    // Apply anything the out-of-thread fault helper recorded since the last draw. It makes the
+    // page writable immediately so the guest can continue, and leaves the invalidation to us;
+    // doing it here means the GPU never reads a buffer the guest has already overwritten.
+    Core::FaultHelper::Drain();
     RENDERER_TRACE;
 
     scheduler.PopPendingOperations();
@@ -319,6 +324,10 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 }
 
 void Rasterizer::DispatchDirect() {
+    // Apply anything the out-of-thread fault helper recorded since the last draw. It makes the
+    // page writable immediately so the guest can continue, and leaves the invalidation to us;
+    // doing it here means the GPU never reads a buffer the guest has already overwritten.
+    Core::FaultHelper::Drain();
     RENDERER_TRACE;
 
     scheduler.PopPendingOperations();
