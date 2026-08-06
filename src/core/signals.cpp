@@ -11,14 +11,7 @@
 #include "emulator.h"
 
 #ifdef _WIN32
-#include <atomic>
-#include <chrono>
-#include <thread>
-#include <unordered_set>
 #include <windows.h>
-// tlhelp32.h requires windows.h to have been included first; keep it in its own block so the
-// include sorter cannot move it above.
-#include <tlhelp32.h>
 static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
 #else
 #include <csignal>
@@ -39,90 +32,6 @@ namespace Core {
 
 #if defined(_WIN32)
 
-// ---------------------------------------------------------------------------
-// RED ZONE MEASUREMENT (diagnostic build only)
-//
-// CUSA00049 dies at 0x8012d6ca5 dereferencing a pointer it reloaded from [rsp-0x20], which
-// reads zero. The guest stores it there from RSI at 0x8012d6a3e, and RSI is provably non-null
-// at that point: the prologue dereferences [rsi+0x10] at 0x8012d68d1 and reads it again at
-// 0x8012d696f, and nothing writes RSI in between.
-//
-// [rsp-0x20] is inside the System V red zone, the 128 bytes below RSP that a leaf function may
-// use without moving the stack pointer. Windows has no red zone: when it dispatches an
-// exception to a thread it writes its own records immediately below RSP, before any user code
-// runs. Nothing the handler does can prevent or undo that.
-//
-// So a handler can never observe the pre-fault contents of the red zone - by the time it runs,
-// the evidence is already gone. That is why the earlier probes kept reporting the slot as
-// zero: they were reading the damage, not the cause.
-//
-// The registers in the CONTEXT, on the other hand, are the guest's real register state and no
-// stack write can touch them. Breaking on the instruction right after the store and comparing
-// RSI against the slot it was just written to therefore measures the destruction directly:
-// if RSI is non-null and the slot reads zero, the dispatch ate it.
-// ---------------------------------------------------------------------------
-
-/// First instruction after `mov QWORD PTR [rsp-0x20], rsi` in the leaf function at 0x8012d68c0.
-static constexpr u64 GuestStoreRip = 0x8012d6a43;
-/// Bounds of that leaf function, used to log any exception taken while it is running.
-static constexpr u64 GuestFuncLo = 0x8012d68c0;
-static constexpr u64 GuestFuncHi = 0x8012d6ca8;
-/// Offset of the watched red-zone slot from the owning frame's RSP.
-static constexpr u64 RedZoneSlot = 0x20;
-/// How many samples to take before disarming. The trap is an exception and therefore does the
-/// same damage as the faults under investigation, so it must not stay armed.
-static constexpr u64 MaxTrapSamples = 8;
-
-/// DR7 bit 2 (L1) enables DR1; bits 20..23 stay zero, which encodes RW1=00 "break on
-/// instruction execution" with LEN1=00, the only legal length for an execution breakpoint.
-static constexpr u64 Dr7EnableExec1 = 0x4ULL;
-
-/// Installs the execution breakpoint on every thread of this process, including ones created
-/// later. Debug registers are per-thread and reachable only through a thread's CONTEXT, so each
-/// thread has to be suspended briefly once; after that it is remembered and left alone.
-static void RedZoneArmerThread() {
-    std::unordered_set<DWORD> armed;
-    const DWORD pid = GetCurrentProcessId();
-    const DWORD self = GetCurrentThreadId();
-    while (true) {
-        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        if (snapshot != INVALID_HANDLE_VALUE) {
-            THREADENTRY32 entry{};
-            entry.dwSize = sizeof(THREADENTRY32);
-            if (Thread32First(snapshot, &entry)) {
-                do {
-                    if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self ||
-                        armed.contains(entry.th32ThreadID)) {
-                        continue;
-                    }
-                    const HANDLE thread =
-                        OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
-                                   FALSE, entry.th32ThreadID);
-                    if (thread == nullptr) {
-                        continue;
-                    }
-                    if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
-                        CONTEXT ctx{};
-                        ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                        if (GetThreadContext(thread, &ctx)) {
-                            ctx.Dr1 = GuestStoreRip;
-                            ctx.Dr7 = (ctx.Dr7 & ~(0xFULL << 20)) | Dr7EnableExec1;
-                            ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                            if (SetThreadContext(thread, &ctx)) {
-                                armed.insert(entry.th32ThreadID);
-                            }
-                        }
-                        ResumeThread(thread);
-                    }
-                    CloseHandle(thread);
-                } while (Thread32Next(snapshot, &entry));
-            }
-            CloseHandle(snapshot);
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    }
-}
-
 static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     const auto* signals = Signals::Instance();
     DWORD code = 0;
@@ -131,23 +40,6 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     if (pExp != nullptr && pExp->ExceptionRecord != nullptr) {
         code = pExp->ExceptionRecord->ExceptionCode;
         address = pExp->ExceptionRecord->ExceptionAddress;
-    }
-
-    // Any exception taken while the watched guest function is running matters, not just the
-    // memory-tracking faults the old probe looked at: every kind of dispatch writes below RSP,
-    // and a C++ throw or an APC delivered here would have been completely invisible before.
-    if (pExp != nullptr && pExp->ContextRecord != nullptr && code != EXCEPTION_SINGLE_STEP) {
-        const u64 rip = pExp->ContextRecord->Rip;
-        if (rip >= GuestFuncLo && rip < GuestFuncHi) {
-            static std::atomic<u32> seen{0};
-            if (seen.fetch_add(1, std::memory_order_relaxed) < 200) {
-                const auto* rz = reinterpret_cast<const u64*>(pExp->ContextRecord->Rsp);
-                LOG_WARNING(Debug,
-                            "RedZoneWatch: exception {:#x} at rip={:#x} rsp={:#x}  "
-                            "[rsp-0x20]={:#018x}",
-                            static_cast<u64>(code), rip, pExp->ContextRecord->Rsp, rz[-4]);
-            }
-        }
     }
 
     bool handled = false;
@@ -159,52 +51,6 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     case EXCEPTION_ILLEGAL_INSTRUCTION:
         handled = signals->DispatchIllegalInstruction(pExp);
         break;
-    case EXCEPTION_SINGLE_STEP: {
-        auto* c = pExp != nullptr ? pExp->ContextRecord : nullptr;
-        if (c == nullptr) {
-            return EXCEPTION_CONTINUE_SEARCH;
-        }
-        // DR1 - execution breakpoint on the instruction right after the guest stores its
-        // pointer into the red zone. The register file in the CONTEXT is the guest's real
-        // register state and is untouched by anything the kernel writes to the stack, so
-        // comparing RSI against the slot it was just stored into is a direct measurement of
-        // whether the exception dispatch destroyed the store on its way in.
-        //
-        // The trap is deliberately short-lived. It is itself an exception, so it inflicts the
-        // very damage it measures; after a handful of samples it disarms so the rest of the
-        // run behaves like an ordinary build.
-        if ((c->Dr6 & 0x2ULL) != 0) {
-            const u64 slot = c->Rsp - RedZoneSlot;
-            const u64 stored = *reinterpret_cast<const u64*>(slot);
-            static std::atomic<u64> calls{0};
-            const u64 n = calls.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (n <= MaxTrapSamples) {
-                const auto* rz = reinterpret_cast<const u64*>(c->Rsp);
-                LOG_CRITICAL(Debug,
-                             "RedZoneTrap #{}: guest rsi={:#018x} was stored at {:#x}; the slot "
-                             "now reads {:#018x}  ({})",
-                             n, c->Rsi, slot, stored,
-                             c->Rsi != 0 && stored == 0 ? "DESTROYED BY THE DISPATCH" : "intact");
-                LOG_CRITICAL(Debug,
-                             "RedZoneTrap #{}: red zone [-0x40]={:#018x} [-0x38]={:#018x} "
-                             "[-0x30]={:#018x} [-0x28]={:#018x} [-0x20]={:#018x}",
-                             n, rz[-8], rz[-7], rz[-6], rz[-5], rz[-4]);
-                Common::Log::Flush();
-            }
-            if (n >= MaxTrapSamples) {
-                // Enough. Stand down so the game can run at full speed and fail - or not - on
-                // its own terms.
-                c->Dr7 = 0;
-            }
-            c->Dr6 = 0;
-            // RF tells the processor to execute the instruction under the breakpoint once
-            // without trapping again, which is what makes resuming here safe.
-            c->EFlags |= 0x10000;
-            c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
-            return EXCEPTION_CONTINUE_EXECUTION;
-        }
-        return EXCEPTION_CONTINUE_EXECUTION;
-    }
     case DBG_PRINTEXCEPTION_C:
     case DBG_PRINTEXCEPTION_WIDE_C:
         // Used by OutputDebugString functions.
@@ -223,13 +69,10 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     // Breakpoints almost certainly come from our asserts/unreachables, no need to log it again.
     if (code != EXCEPTION_BREAKPOINT) {
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
-        // Dump enough state to identify what corrupted the guest.
-        //
-        // The System V ABI lets guest leaf functions keep live data in the 128 bytes below RSP
-        // (the red zone). Windows has no red zone and writes exception frames there, so any
-        // handled fault taken while such a function is running destroys that data. Printing
-        // the registers and the red zone at the moment of the fatal fault says whether that is
-        // what actually happened here, or whether the corruption comes from somewhere else.
+        // On an access violation, dump the guest state around the faulting frame. The System V
+        // ABI the guest is compiled for reserves the 128 bytes below RSP - the red zone - for
+        // leaf functions, and Windows writes exception records there, so a crash caused by that
+        // corruption is recognisable from the red zone alone.
         if (code == EXCEPTION_ACCESS_VIOLATION && pExp != nullptr &&
             pExp->ContextRecord != nullptr) {
             const auto* ctx = pExp->ContextRecord;
@@ -242,21 +85,12 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
                 LOG_CRITICAL(Debug, "  [rsp-{:#05x}] {:#018x}   [rsp-{:#05x}] {:#018x}",
                              128 - i * 8, red[i], 128 - (i + 1) * 8, red[i + 1]);
             }
-            // Also dump above RSP. A faulting leaf function pushes nothing, so the caller's
-            // frame starts immediately here: the same values the crashing function received
-            // as arguments are still visible in the caller's own locals. Comparing the two
-            // says whether a pointer arrived corrupted or was corrupted after being stored.
-            const auto* up = reinterpret_cast<const u64*>(ctx->Rsp);
-            for (u32 i = 0; i < 16; i += 2) {
-                LOG_CRITICAL(Debug, "  [rsp+{:#05x}] {:#018x}   [rsp+{:#05x}] {:#018x}", i * 8,
-                             up[i], (i + 1) * 8, up[i + 1]);
-            }
         }
-        // Flush before anything else. Emulator::Shutdown() only flushes on its first call
-        // (it early-returns once exit_done is set), so any earlier non-fatal exception -
-        // a C++ exception at 0xe06d7363, for instance - permanently disables the flush for
-        // every crash that follows. The line above would then never reach the file and the
-        // log would simply end mid-write, which is exactly what CUSA00049 looked like.
+        // Flush before anything else. Emulator::Shutdown() only flushes on its first call - it
+        // early-returns once its exit_done flag is set - so any earlier non-fatal exception,
+        // a C++ exception at 0xe06d7363 for instance, permanently disables the flush for every
+        // crash that follows. The line above would then never reach the file and the log would
+        // simply end mid-write, hiding the crash entirely.
         Common::Log::Flush();
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
@@ -338,8 +172,6 @@ SignalDispatch::SignalDispatch() {
 #if defined(_WIN32)
     ASSERT_MSG(handle = AddVectoredExceptionHandler(0, SignalHandler),
                "Failed to register exception handler.");
-    // Diagnostic: installs the red-zone execution breakpoint on every guest thread.
-    std::thread(RedZoneArmerThread).detach();
 #else
     struct sigaction action{};
     action.sa_sigaction = SignalHandler;
