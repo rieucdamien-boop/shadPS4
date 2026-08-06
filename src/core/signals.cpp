@@ -11,9 +11,14 @@
 #include "emulator.h"
 
 #ifdef _WIN32
-#include <mutex>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <unordered_set>
 #include <windows.h>
+// tlhelp32.h requires windows.h to have been included first; keep it in its own block so the
+// include sorter cannot move it above.
+#include <tlhelp32.h>
 static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
 #else
 #include <csignal>
@@ -35,96 +40,100 @@ namespace Core {
 #if defined(_WIN32)
 
 // ---------------------------------------------------------------------------
-// RED ZONE PROBE (diagnostic build only)
+// RED ZONE TRAP (diagnostic build only)
 //
-// The System V ABI the guest is compiled for reserves 128 bytes below RSP - the
-// "red zone" - which leaf functions may use for locals without adjusting RSP.
-// Windows has no red zone: when a fault occurs, the kernel writes the CONTEXT
-// and EXCEPTION_RECORD immediately below RSP, destroying whatever the guest had
-// stored there. Because that happens before any of our code runs, the handler
-// cannot save or restore it.
+// CUSA00049 dies deterministically at 0x8012d6ca5, dereferencing a pointer it has just
+// reloaded from [rsp-0x20]. That pointer is written at 0x8012d6a3e from RSI, which the
+// prologue proves non-null (it dereferences [rsi+0x10] at 0x8012d68d1) and which nothing
+// rewrites in between. At the moment of the crash the slot reads zero while the caller's own
+// copy of the same pointer is still intact one frame up, so the red-zone copy is destroyed
+// while the frame that owns it is still live.
 //
-// This probe records the first occurrence of every guest RIP that takes a
-// *handled* access violation (i.e. one of our memory-tracking faults). If a RIP
-// belonging to a leaf function that keeps live data in its red zone shows up
-// here, that function's locals were silently corrupted.
+// The previous iteration armed a hardware watchpoint from inside the fault handler, which
+// meant it could only ever arm on a thread that happened to take a tracked memory fault while
+// the window was open. On the run that crashed, the fatal thread took exactly one such fault
+// inside the window - and the slot was *already* zero when it did. So the corruption does not
+// come from our fault handler, and a fault-driven trap can never be armed early enough to
+// witness it.
 //
-// Deduplicated by RIP and capped, so it cannot flood the log.
+// This version does not depend on faults at all. A monitor thread installs an execution
+// breakpoint (DR1) on the instruction immediately after the store, on every thread in the
+// process. When it fires, the pointer has just been written and is live; we then point a write
+// watchpoint (DR0) at that exact slot. Whatever writes it next - guest code, emulator code or
+// the kernel - stops the processor on the spot and identifies itself by its RIP.
 // ---------------------------------------------------------------------------
-/// RSP of the leaf frame that owned the watched red-zone slot, per thread.
+
+/// First instruction after `mov QWORD PTR [rsp-0x20], rsi` in the leaf function at 0x8012d68c0.
+static constexpr u64 GuestStoreRip = 0x8012d6a43;
+/// Bounds of that leaf function, used to log any exception taken while it is running.
+static constexpr u64 GuestFuncLo = 0x8012d68c0;
+static constexpr u64 GuestFuncHi = 0x8012d6ca8;
+/// Offset of the watched red-zone slot from the owning frame's RSP.
+static constexpr u64 RedZoneSlot = 0x20;
+/// The leaf pushes six registers, so a live frame still has its return address at rsp+0x30.
+static constexpr u64 LeafReturnSlot = 0x30;
+static constexpr u64 LeafReturnAddress = 0x8012df2b4;
+/// The guest image is loaded at 0x800000000; anything below that is host code.
+static constexpr u64 GuestImageBase = 0x800000000;
+
+/// DR7 bit 0 (L0) enables DR0, and bits 16..19 hold (LEN0 << 2) | RW0 - here RW0=01 for
+/// "break on data write" and LEN0=11 for eight bytes, giving 0xD. Bit 2 (L1) enables DR1, and
+/// bits 20..23 stay zero, which encodes RW1=00 "break on instruction execution" with LEN1=00,
+/// the only legal length for an execution breakpoint.
+static constexpr u64 Dr7EnableExec1 = 0x4ULL;
+static constexpr u64 Dr7EnableWrite0 = 0x1ULL | (0xDULL << 16);
+static constexpr u64 Dr7MaskWrite0 = 0xFULL | (0xFULL << 16);
+
+/// RSP of the frame whose red-zone slot DR0 currently watches, per thread.
 static u64& TrapLeafRsp() {
     static thread_local u64 value = 0;
     return value;
 }
 
-static void ProbeRedZone(const EXCEPTION_POINTERS* pExp) {
-    static std::mutex probe_mutex;
-    static std::unordered_set<u64> seen_rips;
-    static constexpr size_t MaxDistinctRips = 8192;
-
-    if (pExp == nullptr || pExp->ContextRecord == nullptr || pExp->ExceptionRecord == nullptr) {
-        return;
-    }
-    const u64 rip = pExp->ContextRecord->Rip;
-    const u64 rsp = pExp->ContextRecord->Rsp;
-
-    // Watch the red zone of one specific guest function across the faults it takes.
-    //
-    // CUSA00049 stores a pointer at [rsp-0x20] early in the leaf function at 0x8012d68c0 and
-    // reloads it near the end, where it is null. The pointer is provably valid on entry (the
-    // prologue dereferences it at 0x8012d68d1) and the caller's own copy is still intact at the
-    // moment of the crash, so something destroys the red-zone copy in between. Logging it on
-    // every fault taken inside that function shows exactly which fault does it.
-    // Window narrowed to the span where the pointer is live: from just after the store at
-    // 0x8012d6a3e to the reload at 0x8012d6ca0. A previous attempt watched the whole function
-    // and burned its entire logging budget on the hot loop at 0x8012d6929, which runs *before*
-    // the store and therefore says nothing about the corruption.
-    static constexpr u64 WatchLo = 0x8012d6a43;
-    static constexpr u64 WatchHi = 0x8012d6ca5;
-    static std::atomic<u32> watch_count{0};
-    if (rip >= WatchLo && rip < WatchHi &&
-        watch_count.fetch_add(1, std::memory_order_relaxed) < 2000) {
-        const auto* rz = reinterpret_cast<const u64*>(rsp);
-        LOG_WARNING(Debug,
-                    "RedZoneWatch: fault at rip={:#x} rsp={:#x}  [rsp-0x20]={:#018x} "
-                    "[rsp-0x18]={:#018x} [rsp-0x10]={:#018x} [rsp-0x08]={:#018x}",
-                    rip, rsp, rz[-4], rz[-3], rz[-2], rz[-1]);
-
-        // Arm a hardware write watchpoint on the slot, once, on the first thread that still
-        // holds a plausible pointer there. DR0..DR3 are per-thread and are restored from this
-        // CONTEXT when the handler returns EXCEPTION_CONTINUE_EXECUTION, so setting them here
-        // installs the watchpoint on the guest thread itself. The processor then traps the
-        // very instruction that writes the slot, whoever it belongs to - guest code, emulator
-        // code, or the kernel - which is the one thing static analysis cannot tell us.
-        // Armed once per thread rather than once globally: the thread that crashes is not
-        // necessarily the first one to qualify, and a single global arm kept landing on a
-        // worker while the fatal fault happened on Game:Main.
-        static thread_local bool trap_armed = false;
-        if (rz[-4] > 0x1000000000ULL && !trap_armed) {
-            trap_armed = true;
-            auto* c = pExp->ContextRecord;
-            const u64 slot = rsp - 0x20;
-            c->Dr0 = slot;
-            // L0 enables the breakpoint; bits 16..19 are (LEN0 << 2) | RW0, with RW0=01 for
-            // "data write" and LEN0=11 for eight bytes. The address must be 8-byte aligned.
-            c->Dr7 = (c->Dr7 & ~0xFULL) | 0x1ULL;
-            c->Dr7 = (c->Dr7 & ~(0xFULL << 16)) | (0xDULL << 16);
-            c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
-            TrapLeafRsp() = rsp;
-            LOG_CRITICAL(Debug, "RedZoneTrap: armed on {:#x} (value {:#018x}) from rip={:#x}", slot,
-                         rz[-4], rip);
+/// Installs the execution breakpoint on every thread of this process, including ones created
+/// later. Debug registers are per-thread and reachable only through a thread's CONTEXT, so each
+/// thread has to be suspended briefly once; after that it is remembered and left alone.
+static void RedZoneArmerThread() {
+    std::unordered_set<DWORD> armed;
+    const DWORD pid = GetCurrentProcessId();
+    const DWORD self = GetCurrentThreadId();
+    while (true) {
+        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshot != INVALID_HANDLE_VALUE) {
+            THREADENTRY32 entry{};
+            entry.dwSize = sizeof(THREADENTRY32);
+            if (Thread32First(snapshot, &entry)) {
+                do {
+                    if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self ||
+                        armed.contains(entry.th32ThreadID)) {
+                        continue;
+                    }
+                    const HANDLE thread =
+                        OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
+                                   FALSE, entry.th32ThreadID);
+                    if (thread == nullptr) {
+                        continue;
+                    }
+                    if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+                        CONTEXT ctx{};
+                        ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                        if (GetThreadContext(thread, &ctx)) {
+                            ctx.Dr1 = GuestStoreRip;
+                            ctx.Dr7 = (ctx.Dr7 & ~(0xFULL << 20)) | Dr7EnableExec1;
+                            ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                            if (SetThreadContext(thread, &ctx)) {
+                                armed.insert(entry.th32ThreadID);
+                            }
+                        }
+                        ResumeThread(thread);
+                    }
+                    CloseHandle(thread);
+                } while (Thread32Next(snapshot, &entry));
+            }
+            CloseHandle(snapshot);
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
-    {
-        std::scoped_lock lock{probe_mutex};
-        if (seen_rips.size() >= MaxDistinctRips || !seen_rips.insert(rip).second) {
-            return;
-        }
-    }
-    LOG_WARNING(Debug,
-                "RedZoneProbe: handled AV  rip={:#x}  rsp={:#x}  fault_addr={:#x}  is_write={}",
-                rip, rsp, static_cast<u64>(pExp->ExceptionRecord->ExceptionInformation[1]),
-                static_cast<u64>(pExp->ExceptionRecord->ExceptionInformation[0]));
 }
 
 static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
@@ -137,46 +146,104 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
         address = pExp->ExceptionRecord->ExceptionAddress;
     }
 
+    // Any exception taken while the watched guest function is running matters, not just the
+    // memory-tracking faults the old probe looked at: every kind of dispatch writes below RSP,
+    // and a C++ throw or an APC delivered here would have been completely invisible before.
+    if (pExp != nullptr && pExp->ContextRecord != nullptr && code != EXCEPTION_SINGLE_STEP) {
+        const u64 rip = pExp->ContextRecord->Rip;
+        if (rip >= GuestFuncLo && rip < GuestFuncHi) {
+            static std::atomic<u32> seen{0};
+            if (seen.fetch_add(1, std::memory_order_relaxed) < 200) {
+                const auto* rz = reinterpret_cast<const u64*>(pExp->ContextRecord->Rsp);
+                LOG_WARNING(Debug,
+                            "RedZoneWatch: exception {:#x} at rip={:#x} rsp={:#x}  "
+                            "[rsp-0x20]={:#018x}",
+                            static_cast<u64>(code), rip, pExp->ContextRecord->Rsp, rz[-4]);
+            }
+        }
+    }
+
     bool handled = false;
     switch (code) {
     case EXCEPTION_ACCESS_VIOLATION:
         handled = signals->DispatchAccessViolation(
             pExp, reinterpret_cast<void*>(pExp->ExceptionRecord->ExceptionInformation[1]));
-        if (handled) {
-            ProbeRedZone(pExp);
-        }
         break;
     case EXCEPTION_ILLEGAL_INSTRUCTION:
         handled = signals->DispatchIllegalInstruction(pExp);
         break;
     case EXCEPTION_SINGLE_STEP: {
-        // Hardware watchpoint hit, armed in ProbeRedZone. DR6 bit 0 identifies DR0. The trap
-        // fires after the write retires, so RIP already points at the following instruction.
-        auto* c = pExp->ContextRecord;
-        if (c != nullptr && (c->Dr6 & 0x1ULL) != 0) {
-            const auto* slot = reinterpret_cast<const u64*>(c->Dr0);
-            LOG_CRITICAL(Debug,
-                         "RedZoneTrap: WRITE to {:#x} -> {:#018x}, by instruction just before "
-                         "rip={:#x}  rsp={:#x}",
-                         static_cast<u64>(c->Dr0), *slot, c->Rip, c->Rsp);
-            // Was the leaf function that owns this slot still running? Its frame is six pushed
-            // registers deep, so its return address sits at rsp+0x30. If that still reads as a
-            // return into the caller at 0x8012df2b4, the frame is intact and its red zone was
-            // trampled while live - a real bug. Anything else means the function had already
-            // returned and this write is ordinary stack reuse: a false positive.
-            const u64 leaf_rsp = TrapLeafRsp();
-            if (leaf_rsp != 0) {
-                const auto* ret = reinterpret_cast<const u64*>(leaf_rsp + 0x30);
-                LOG_CRITICAL(Debug,
-                             "RedZoneTrap: leaf rsp={:#x} return slot={:#018x} (0x8012df2b4 means "
-                             "still live)  writer is {:#x} bytes deeper",
-                             leaf_rsp, *ret, leaf_rsp - c->Rsp);
+        auto* c = pExp != nullptr ? pExp->ContextRecord : nullptr;
+        if (c == nullptr) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        // DR1 - execution breakpoint just after the store. The pointer is in the red zone and
+        // live from here until the reload at 0x8012d6ca0, so aim the write watchpoint at it.
+        // Re-aimed on every call: the invocation that gets corrupted is not necessarily the
+        // first one this thread makes.
+        if ((c->Dr6 & 0x2ULL) != 0) {
+            const u64 slot = c->Rsp - RedZoneSlot;
+            const u64 value = *reinterpret_cast<const u64*>(slot);
+            TrapLeafRsp() = c->Rsp;
+            static std::atomic<u64> calls{0};
+            const u64 n = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (value == 0) {
+                // The guest stored a null itself. That would move the bug upstream of this
+                // function entirely and clear the red zone of any responsibility.
+                LOG_CRITICAL(
+                    Debug, "RedZoneTrap: the value stored is ALREADY ZERO at rsp={:#x} (call #{})",
+                    c->Rsp, n);
+            } else {
+                c->Dr0 = slot;
+                c->Dr7 = (c->Dr7 & ~Dr7MaskWrite0) | Dr7EnableWrite0;
             }
-            // Disarm: one witness is enough, and leaving it armed would trap every frame.
-            c->Dr7 = 0;
+            if ((n & (n - 1)) == 0) {
+                LOG_INFO(Debug, "RedZoneTrap: watching call #{}  slot={:#x}  value={:#018x}", n,
+                         slot, value);
+            }
+            c->Dr6 = 0;
+            // RF tells the processor to execute the instruction under the breakpoint once
+            // without trapping again, which is what makes resuming here safe.
+            c->EFlags |= 0x10000;
+            c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        // DR0 - the watched slot was written. The trap fires after the write retires, so RIP
+        // already points at the instruction following the one responsible.
+        if ((c->Dr6 & 0x1ULL) != 0) {
+            const u64 slot = c->Dr0;
+            const u64 value = *reinterpret_cast<const u64*>(slot);
+            const u64 leaf_rsp = TrapLeafRsp();
+            const u64 ret =
+                leaf_rsp != 0 ? *reinterpret_cast<const u64*>(leaf_rsp + LeafReturnSlot) : 0;
+            // Two signatures are worth waking up for. A writer whose RIP is below the guest
+            // image is host code - the emulator or the kernel reaching into the guest's stack,
+            // which is the bug we are hunting. A zero written while the leaf's return address
+            // is still in place means the frame was live and its red zone was trampled.
+            // Everything else is ordinary stack reuse after the function returned, which the
+            // previous build drowned in; those are counted, not printed.
+            const bool writer_is_host = c->Rip < GuestImageBase;
+            const bool frame_still_live = ret == LeafReturnAddress;
+            if (writer_is_host || (frame_still_live && value == 0)) {
+                LOG_CRITICAL(Debug,
+                             "RedZoneTrap: WRITE to {:#x} -> {:#018x} by the instruction before "
+                             "rip={:#x}  rsp={:#x}  leaf rsp={:#x}  return slot={:#018x}  "
+                             "host_writer={}  frame_live={}",
+                             slot, value, c->Rip, c->Rsp, leaf_rsp, ret, writer_is_host,
+                             frame_still_live);
+                Common::Log::Flush();
+            } else {
+                static std::atomic<u64> reuse{0};
+                const u64 n = reuse.fetch_add(1, std::memory_order_relaxed) + 1;
+                if ((n & (n - 1)) == 0) {
+                    LOG_INFO(Debug, "RedZoneTrap: {} benign stack reuses so far", n);
+                }
+            }
+            // Keep the execution breakpoint, drop the watchpoint: the next call re-aims it.
+            c->Dr7 &= ~Dr7MaskWrite0;
             c->Dr6 = 0;
             c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
-            Common::Log::Flush();
+            return EXCEPTION_CONTINUE_EXECUTION;
         }
         return EXCEPTION_CONTINUE_EXECUTION;
     }
@@ -313,6 +380,8 @@ SignalDispatch::SignalDispatch() {
 #if defined(_WIN32)
     ASSERT_MSG(handle = AddVectoredExceptionHandler(0, SignalHandler),
                "Failed to register exception handler.");
+    // Diagnostic: installs the red-zone execution breakpoint on every guest thread.
+    std::thread(RedZoneArmerThread).detach();
 #else
     struct sigaction action{};
     action.sa_sigaction = SignalHandler;
