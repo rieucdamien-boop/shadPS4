@@ -27,6 +27,42 @@ using LockType = Common::AdaptiveMutex;
 using LockType = Common::SpinLock;
 #endif
 
+/// One flag per tracker region, recording that the guest took a write fault there.
+///
+/// The page-fault handler runs in the middle of a guest instruction and cannot touch the buffer
+/// cache, so it drops a flag here and the next upload cycle picks it up. A fault is the one
+/// unambiguous signal that the guest wrote a page *after* it was uploaded and re-protected -
+/// exactly the memory that must stop being protected.
+///
+/// Hashed into a fixed table, so distinct regions can collide. A collision only pins another
+/// region's dirty pages one cycle earlier than the counters would have; it never pins a page the
+/// GPU writes, because ChangeRegionState releases those pins.
+class StickyRegions {
+    static constexpr size_t TableBits = 16;
+    static constexpr size_t TableSize = 1ULL << TableBits;
+
+public:
+    /// Called from the guest page-fault handler. Setting one relaxed atomic is all the work
+    /// that is permitted here.
+    static void MarkFaulted(VAddr addr) {
+        faulted[Index(addr)].store(true, std::memory_order_relaxed);
+    }
+
+    /// Reads and clears the flag for a region.
+    static bool TakeFaulted(VAddr region_addr) {
+        auto& slot = faulted[Index(region_addr)];
+        return slot.load(std::memory_order_relaxed) &&
+               slot.exchange(false, std::memory_order_relaxed);
+    }
+
+private:
+    static size_t Index(VAddr addr) {
+        return (addr >> TRACKER_HIGHER_PAGE_BITS) & (TableSize - 1);
+    }
+
+    static inline std::array<std::atomic<bool>, TableSize> faulted{};
+};
+
 /**
  * Allows tracking CPU and GPU modification of pages in a contigious 16MB virtual address region.
  * Information is stored in bitsets for spacial locality and fast update of single pages.
@@ -115,7 +151,7 @@ public:
 
     /**
      * Loop over each page in the given range, turn off those bits and notify the tracker if
-     * needed. Call the given function on each turned off range.
+     * needed. Call the given function on each turned off region.
      *
      * @param query_cpu_range Base CPU address to loop over
      * @param size            Size in bytes of the CPU range to loop over
@@ -157,7 +193,14 @@ public:
                 const RegionBits cleared(bits, start_page, end_page);
                 bits.UnsetRange(start_page, end_page);
 
-                pinned |= cleared & seen_twice;
+                if (StickyRegions::TakeFaulted(cpu_addr)) {
+                    // The guest already paid for a fault in this region since the last cycle,
+                    // which proves it writes here after uploads. Pin what is dirty now instead
+                    // of waiting for the counters to agree.
+                    pinned |= cleared;
+                } else {
+                    pinned |= cleared & seen_twice;
+                }
                 seen_twice |= cleared & seen_once;
                 seen_once |= cleared;
 
