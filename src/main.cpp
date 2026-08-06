@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <vector>
 #include <CLI/CLI.hpp>
 #include <SDL3/SDL_messagebox.h>
@@ -17,6 +18,7 @@
 #include "core/debugger.h"
 #include "core/emulator_settings.h"
 #include "core/emulator_state.h"
+#include "core/fault_helper.h"
 #include "core/file_sys/fs.h"
 #include "core/ipc/ipc.h"
 #include "core/user_settings.h"
@@ -32,6 +34,13 @@
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
+
+    // Started by the emulator to handle its guest page faults from outside the faulting thread.
+    // Checked before anything else: this process must not initialise any emulator state, it only
+    // attaches as a debugger and services debug events. See core/fault_helper.h.
+    if (argc == 3 && std::string_view(argv[1]) == "--fault-helper") {
+        return Core::FaultHelper::Run(static_cast<u32>(std::stoul(argv[2])));
+    }
 #endif
 
 #if defined(__APPLE__) && defined(ARCH_X86_64)
