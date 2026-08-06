@@ -51,6 +51,12 @@ namespace Core {
 //
 // Deduplicated by RIP and capped, so it cannot flood the log.
 // ---------------------------------------------------------------------------
+/// RSP of the leaf frame that owned the watched red-zone slot, per thread.
+static u64& TrapLeafRsp() {
+    static thread_local u64 value = 0;
+    return value;
+}
+
 static void ProbeRedZone(const EXCEPTION_POINTERS* pExp) {
     static std::mutex probe_mutex;
     static std::unordered_set<u64> seen_rips;
@@ -90,8 +96,12 @@ static void ProbeRedZone(const EXCEPTION_POINTERS* pExp) {
         // installs the watchpoint on the guest thread itself. The processor then traps the
         // very instruction that writes the slot, whoever it belongs to - guest code, emulator
         // code, or the kernel - which is the one thing static analysis cannot tell us.
-        static std::atomic<bool> trap_armed{false};
-        if (rz[-4] > 0x1000000000ULL && !trap_armed.exchange(true)) {
+        // Armed once per thread rather than once globally: the thread that crashes is not
+        // necessarily the first one to qualify, and a single global arm kept landing on a
+        // worker while the fatal fault happened on Game:Main.
+        static thread_local bool trap_armed = false;
+        if (rz[-4] > 0x1000000000ULL && !trap_armed) {
+            trap_armed = true;
             auto* c = pExp->ContextRecord;
             const u64 slot = rsp - 0x20;
             c->Dr0 = slot;
@@ -100,8 +110,9 @@ static void ProbeRedZone(const EXCEPTION_POINTERS* pExp) {
             c->Dr7 = (c->Dr7 & ~0xFULL) | 0x1ULL;
             c->Dr7 = (c->Dr7 & ~(0xFULL << 16)) | (0xDULL << 16);
             c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
-            LOG_CRITICAL(Debug, "RedZoneTrap: armed on {:#x} (value {:#018x}) from rip={:#x}",
-                         slot, rz[-4], rip);
+            TrapLeafRsp() = rsp;
+            LOG_CRITICAL(Debug, "RedZoneTrap: armed on {:#x} (value {:#018x}) from rip={:#x}", slot,
+                         rz[-4], rip);
         }
     }
     {
@@ -148,6 +159,19 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
                          "RedZoneTrap: WRITE to {:#x} -> {:#018x}, by instruction just before "
                          "rip={:#x}  rsp={:#x}",
                          static_cast<u64>(c->Dr0), *slot, c->Rip, c->Rsp);
+            // Was the leaf function that owns this slot still running? Its frame is six pushed
+            // registers deep, so its return address sits at rsp+0x30. If that still reads as a
+            // return into the caller at 0x8012df2b4, the frame is intact and its red zone was
+            // trampled while live - a real bug. Anything else means the function had already
+            // returned and this write is ordinary stack reuse: a false positive.
+            const u64 leaf_rsp = TrapLeafRsp();
+            if (leaf_rsp != 0) {
+                const auto* ret = reinterpret_cast<const u64*>(leaf_rsp + 0x30);
+                LOG_CRITICAL(Debug,
+                             "RedZoneTrap: leaf rsp={:#x} return slot={:#018x} (0x8012df2b4 means "
+                             "still live)  writer is {:#x} bytes deeper",
+                             leaf_rsp, *ret, leaf_rsp - c->Rsp);
+            }
             // Disarm: one witness is enough, and leaving it armed would trap every frame.
             c->Dr7 = 0;
             c->Dr6 = 0;
