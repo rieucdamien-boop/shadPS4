@@ -229,6 +229,7 @@ int Run(u32 parent_pid) {
         return 1;
     }
 
+    Trace("helper: channel mapped, attaching");
     if (!DebugActiveProcess(parent_pid)) {
         Trace("helper: DebugActiveProcess failed");
         return 1;
