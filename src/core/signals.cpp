@@ -40,27 +40,26 @@ namespace Core {
 #if defined(_WIN32)
 
 // ---------------------------------------------------------------------------
-// RED ZONE TRAP (diagnostic build only)
+// RED ZONE MEASUREMENT (diagnostic build only)
 //
-// CUSA00049 dies deterministically at 0x8012d6ca5, dereferencing a pointer it has just
-// reloaded from [rsp-0x20]. That pointer is written at 0x8012d6a3e from RSI, which the
-// prologue proves non-null (it dereferences [rsi+0x10] at 0x8012d68d1) and which nothing
-// rewrites in between. At the moment of the crash the slot reads zero while the caller's own
-// copy of the same pointer is still intact one frame up, so the red-zone copy is destroyed
-// while the frame that owns it is still live.
+// CUSA00049 dies at 0x8012d6ca5 dereferencing a pointer it reloaded from [rsp-0x20], which
+// reads zero. The guest stores it there from RSI at 0x8012d6a3e, and RSI is provably non-null
+// at that point: the prologue dereferences [rsi+0x10] at 0x8012d68d1 and reads it again at
+// 0x8012d696f, and nothing writes RSI in between.
 //
-// The previous iteration armed a hardware watchpoint from inside the fault handler, which
-// meant it could only ever arm on a thread that happened to take a tracked memory fault while
-// the window was open. On the run that crashed, the fatal thread took exactly one such fault
-// inside the window - and the slot was *already* zero when it did. So the corruption does not
-// come from our fault handler, and a fault-driven trap can never be armed early enough to
-// witness it.
+// [rsp-0x20] is inside the System V red zone, the 128 bytes below RSP that a leaf function may
+// use without moving the stack pointer. Windows has no red zone: when it dispatches an
+// exception to a thread it writes its own records immediately below RSP, before any user code
+// runs. Nothing the handler does can prevent or undo that.
 //
-// This version does not depend on faults at all. A monitor thread installs an execution
-// breakpoint (DR1) on the instruction immediately after the store, on every thread in the
-// process. When it fires, the pointer has just been written and is live; we then point a write
-// watchpoint (DR0) at that exact slot. Whatever writes it next - guest code, emulator code or
-// the kernel - stops the processor on the spot and identifies itself by its RIP.
+// So a handler can never observe the pre-fault contents of the red zone - by the time it runs,
+// the evidence is already gone. That is why the earlier probes kept reporting the slot as
+// zero: they were reading the damage, not the cause.
+//
+// The registers in the CONTEXT, on the other hand, are the guest's real register state and no
+// stack write can touch them. Breaking on the instruction right after the store and comparing
+// RSI against the slot it was just written to therefore measures the destruction directly:
+// if RSI is non-null and the slot reads zero, the dispatch ate it.
 // ---------------------------------------------------------------------------
 
 /// First instruction after `mov QWORD PTR [rsp-0x20], rsi` in the leaf function at 0x8012d68c0.
@@ -70,25 +69,13 @@ static constexpr u64 GuestFuncLo = 0x8012d68c0;
 static constexpr u64 GuestFuncHi = 0x8012d6ca8;
 /// Offset of the watched red-zone slot from the owning frame's RSP.
 static constexpr u64 RedZoneSlot = 0x20;
-/// The leaf pushes six registers, so a live frame still has its return address at rsp+0x30.
-static constexpr u64 LeafReturnSlot = 0x30;
-static constexpr u64 LeafReturnAddress = 0x8012df2b4;
-/// The guest image is loaded at 0x800000000; anything below that is host code.
-static constexpr u64 GuestImageBase = 0x800000000;
+/// How many samples to take before disarming. The trap is an exception and therefore does the
+/// same damage as the faults under investigation, so it must not stay armed.
+static constexpr u64 MaxTrapSamples = 8;
 
-/// DR7 bit 0 (L0) enables DR0, and bits 16..19 hold (LEN0 << 2) | RW0 - here RW0=01 for
-/// "break on data write" and LEN0=11 for eight bytes, giving 0xD. Bit 2 (L1) enables DR1, and
-/// bits 20..23 stay zero, which encodes RW1=00 "break on instruction execution" with LEN1=00,
-/// the only legal length for an execution breakpoint.
+/// DR7 bit 2 (L1) enables DR1; bits 20..23 stay zero, which encodes RW1=00 "break on
+/// instruction execution" with LEN1=00, the only legal length for an execution breakpoint.
 static constexpr u64 Dr7EnableExec1 = 0x4ULL;
-static constexpr u64 Dr7EnableWrite0 = 0x1ULL | (0xDULL << 16);
-static constexpr u64 Dr7MaskWrite0 = 0xFULL | (0xFULL << 16);
-
-/// RSP of the frame whose red-zone slot DR0 currently watches, per thread.
-static u64& TrapLeafRsp() {
-    static thread_local u64 value = 0;
-    return value;
-}
 
 /// Installs the execution breakpoint on every thread of this process, including ones created
 /// later. Debug registers are per-thread and reachable only through a thread's CONTEXT, so each
@@ -177,71 +164,42 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
         if (c == nullptr) {
             return EXCEPTION_CONTINUE_SEARCH;
         }
-        // DR1 - execution breakpoint just after the store. The pointer is in the red zone and
-        // live from here until the reload at 0x8012d6ca0, so aim the write watchpoint at it.
-        // Re-aimed on every call: the invocation that gets corrupted is not necessarily the
-        // first one this thread makes.
+        // DR1 - execution breakpoint on the instruction right after the guest stores its
+        // pointer into the red zone. The register file in the CONTEXT is the guest's real
+        // register state and is untouched by anything the kernel writes to the stack, so
+        // comparing RSI against the slot it was just stored into is a direct measurement of
+        // whether the exception dispatch destroyed the store on its way in.
+        //
+        // The trap is deliberately short-lived. It is itself an exception, so it inflicts the
+        // very damage it measures; after a handful of samples it disarms so the rest of the
+        // run behaves like an ordinary build.
         if ((c->Dr6 & 0x2ULL) != 0) {
             const u64 slot = c->Rsp - RedZoneSlot;
-            const u64 value = *reinterpret_cast<const u64*>(slot);
-            TrapLeafRsp() = c->Rsp;
+            const u64 stored = *reinterpret_cast<const u64*>(slot);
             static std::atomic<u64> calls{0};
             const u64 n = calls.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (value == 0) {
-                // The guest stored a null itself. That would move the bug upstream of this
-                // function entirely and clear the red zone of any responsibility.
-                LOG_CRITICAL(
-                    Debug, "RedZoneTrap: the value stored is ALREADY ZERO at rsp={:#x} (call #{})",
-                    c->Rsp, n);
-            } else {
-                c->Dr0 = slot;
-                c->Dr7 = (c->Dr7 & ~Dr7MaskWrite0) | Dr7EnableWrite0;
+            if (n <= MaxTrapSamples) {
+                const auto* rz = reinterpret_cast<const u64*>(c->Rsp);
+                LOG_CRITICAL(Debug,
+                             "RedZoneTrap #{}: guest rsi={:#018x} was stored at {:#x}; the slot "
+                             "now reads {:#018x}  ({})",
+                             n, c->Rsi, slot, stored,
+                             c->Rsi != 0 && stored == 0 ? "DESTROYED BY THE DISPATCH" : "intact");
+                LOG_CRITICAL(Debug,
+                             "RedZoneTrap #{}: red zone [-0x40]={:#018x} [-0x38]={:#018x} "
+                             "[-0x30]={:#018x} [-0x28]={:#018x} [-0x20]={:#018x}",
+                             n, rz[-8], rz[-7], rz[-6], rz[-5], rz[-4]);
+                Common::Log::Flush();
             }
-            if ((n & (n - 1)) == 0) {
-                LOG_INFO(Debug, "RedZoneTrap: watching call #{}  slot={:#x}  value={:#018x}", n,
-                         slot, value);
+            if (n >= MaxTrapSamples) {
+                // Enough. Stand down so the game can run at full speed and fail - or not - on
+                // its own terms.
+                c->Dr7 = 0;
             }
             c->Dr6 = 0;
             // RF tells the processor to execute the instruction under the breakpoint once
             // without trapping again, which is what makes resuming here safe.
             c->EFlags |= 0x10000;
-            c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
-            return EXCEPTION_CONTINUE_EXECUTION;
-        }
-        // DR0 - the watched slot was written. The trap fires after the write retires, so RIP
-        // already points at the instruction following the one responsible.
-        if ((c->Dr6 & 0x1ULL) != 0) {
-            const u64 slot = c->Dr0;
-            const u64 value = *reinterpret_cast<const u64*>(slot);
-            const u64 leaf_rsp = TrapLeafRsp();
-            const u64 ret =
-                leaf_rsp != 0 ? *reinterpret_cast<const u64*>(leaf_rsp + LeafReturnSlot) : 0;
-            // Two signatures are worth waking up for. A writer whose RIP is below the guest
-            // image is host code - the emulator or the kernel reaching into the guest's stack,
-            // which is the bug we are hunting. A zero written while the leaf's return address
-            // is still in place means the frame was live and its red zone was trampled.
-            // Everything else is ordinary stack reuse after the function returned, which the
-            // previous build drowned in; those are counted, not printed.
-            const bool writer_is_host = c->Rip < GuestImageBase;
-            const bool frame_still_live = ret == LeafReturnAddress;
-            if (writer_is_host || (frame_still_live && value == 0)) {
-                LOG_CRITICAL(Debug,
-                             "RedZoneTrap: WRITE to {:#x} -> {:#018x} by the instruction before "
-                             "rip={:#x}  rsp={:#x}  leaf rsp={:#x}  return slot={:#018x}  "
-                             "host_writer={}  frame_live={}",
-                             slot, value, c->Rip, c->Rsp, leaf_rsp, ret, writer_is_host,
-                             frame_still_live);
-                Common::Log::Flush();
-            } else {
-                static std::atomic<u64> reuse{0};
-                const u64 n = reuse.fetch_add(1, std::memory_order_relaxed) + 1;
-                if ((n & (n - 1)) == 0) {
-                    LOG_INFO(Debug, "RedZoneTrap: {} benign stack reuses so far", n);
-                }
-            }
-            // Keep the execution breakpoint, drop the watchpoint: the next call re-aims it.
-            c->Dr7 &= ~Dr7MaskWrite0;
-            c->Dr6 = 0;
             c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
