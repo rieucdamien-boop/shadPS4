@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <mutex>
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
+#include "common/logging/log.h"
 #include "common/path_util.h"
 #include "common/singleton.h"
 #include "core/debug_state.h"
@@ -1132,8 +1135,16 @@ Frame* Presenter::GetRenderFrame() {
 
     // Wait for the presentation to be finished so all frame resources are free
     while (wait() != vk::Result::eSuccess) {
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
+        if (result == vk::Result::eErrorDeviceLost) {
+            // Never spin on a device that is never coming back.
+            static std::once_flag reported;
+            std::call_once(reported, [this] {
+                instance.ReportDeviceFault();
+                LOG_CRITICAL(Render_Vulkan, "Device lost while waiting for a frame. Stopping.");
+                Common::Log::Flush();
+            });
+            std::_Exit(1);
+        }
         // Retry if the waiting times out
         if (result == vk::Result::eTimeout) {
             continue;
