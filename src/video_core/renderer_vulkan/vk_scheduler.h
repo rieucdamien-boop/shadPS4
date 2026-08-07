@@ -4,6 +4,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <queue>
@@ -407,6 +408,14 @@ public:
         return &master_semaphore;
     }
 
+    /// Installs a callback run on every submission, after rendering has ended and before the
+    /// command buffer is closed. It is the only place where something opened in the current
+    /// command buffer can still be closed in it - occlusion queries, in particular, which Vulkan
+    /// requires to begin and end in the same buffer.
+    void SetPreSubmitCallback(std::function<void()> callback) {
+        pre_submit_callback = std::move(callback);
+    }
+
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Will be run when submitting or calling PopPendingOperations.
     void DeferOperation(Common::UniqueFunction<void>&& func) {
@@ -445,6 +454,7 @@ private:
     };
     std::queue<PendingOp> pending_ops;
     std::queue<PendingOp> priority_pending_ops;
+    std::function<void()> pre_submit_callback;
     std::mutex priority_pending_ops_mutex;
     std::condition_variable_any priority_pending_ops_cv;
     std::jthread priority_pending_ops_thread;
