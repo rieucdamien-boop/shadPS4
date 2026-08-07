@@ -194,12 +194,18 @@ public:
                 bits.UnsetRange(start_page, end_page);
 
                 if (StickyRegions::TakeFaulted(cpu_addr)) {
-                    // The guest already paid for a fault in this region since the last cycle,
-                    // which proves it writes here after uploads. Pin what is dirty now instead
-                    // of waiting for the counters to agree.
-                    pinned.Clear();
+                    // This region already cost the guest a fault since the last cycle, which
+                    // proves it is rewritten after being uploaded. Pin its dirty pages a cycle
+                    // early rather than waiting for the counter to agree.
+                    pinned |= cleared & seen_once;
                 } else {
-                    pinned.Clear();
+                    // Otherwise a page has to be dirty on three successive upload cycles before
+                    // it is pinned. Both extremes were measured and both are bad: pinning every
+                    // page costs far more upload bandwidth than the faults it saves, and pinning
+                    // none leaves the guest faulting millions of times on the buffers it rewrites
+                    // every frame - four million in thirteen minutes of Battlefield 4 - each of
+                    // which freezes the whole process while the fault helper services it.
+                    pinned |= cleared & seen_twice;
                 }
                 seen_twice |= cleared & seen_once;
                 seen_once |= cleared;
