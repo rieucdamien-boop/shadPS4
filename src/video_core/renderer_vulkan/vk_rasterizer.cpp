@@ -353,6 +353,13 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
         occlusion_pool = std::move(pool);
     }
 
+    if (!occlusion_active) {
+        // Resetting a query pool is illegal inside a render pass instance, and this can be
+        // reached at any point in a command list. End rendering first so the reset is always
+        // valid; the next draw simply opens a new render pass. A query begun outside a render
+        // pass is allowed to span the ones that follow, which is exactly what is needed here.
+        scheduler.EndRendering();
+    }
     const auto cmdbuf = scheduler.CommandBuffer();
     if (!occlusion_active) {
         // Opening dump. Report zero everywhere so that the difference the guest computes is
@@ -360,12 +367,20 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
         cmdbuf.resetQueryPool(*occlusion_pool, occlusion_slot, 1);
         cmdbuf.beginQuery(*occlusion_pool, occlusion_slot, vk::QueryControlFlags{});
         occlusion_active = true;
+        occlusion_cmdbuf = cmdbuf;
         for (s32 i = 0; i < num_pairs; ++i) {
             results[i * 2] = OcclusionValidMask;
         }
         return true;
     }
 
+    if (cmdbuf != occlusion_cmdbuf) {
+        // The scheduler flushed between the two dumps, so the query was begun in a command
+        // buffer that is already gone. Ending it here would be invalid usage; abandon it and
+        // let the caller fall back to the old answer.
+        occlusion_active = false;
+        return false;
+    }
     cmdbuf.endQuery(*occlusion_pool, occlusion_slot);
     occlusion_active = false;
     for (s32 i = 0; i < num_pairs; ++i) {
