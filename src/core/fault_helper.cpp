@@ -217,7 +217,13 @@ bool Unprotect(HANDLE process, u64 address) {
         wanted = PAGE_EXECUTE_READWRITE;
     }
     DWORD previous = 0;
-    return VirtualProtectEx(process, info.BaseAddress, info.RegionSize, wanted, &previous) != 0;
+    // Only the faulting page, never the whole run VirtualQueryEx reports back. The emulator is
+    // told about exactly one page when the fault is drained, so unprotecting more would leave
+    // the rest writable in hardware while its tracker still believes it is protected. Those
+    // writes would never fault, nobody would learn of them, and the GPU would go on reading
+    // what the guest has already replaced.
+    void* const page = reinterpret_cast<void*>(address & ~static_cast<u64>(0xFFF));
+    return VirtualProtectEx(process, page, 0x1000, wanted, &previous) != 0;
 }
 
 void Publish(u64 address, u32 is_write) {
