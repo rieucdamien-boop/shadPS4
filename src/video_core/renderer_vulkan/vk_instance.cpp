@@ -203,7 +203,8 @@ bool Instance::CreateDevice() {
                           vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
                           vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
                           vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
-                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT>();
+                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT,
+                          vk::PhysicalDeviceFaultFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -333,6 +334,12 @@ bool Instance::CreateDevice() {
                  image_2d_view_of_3d_features.image2DViewOf3D);
         LOG_INFO(Render_Vulkan, "- sampler2DViewOf3D: {}",
                  image_2d_view_of_3d_features.sampler2DViewOf3D);
+    }
+    device_fault = add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+    if (device_fault) {
+        const auto fault_features = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>();
+        device_fault = fault_features.deviceFault;
+        LOG_INFO(Render_Vulkan, "- deviceFault: {}", device_fault);
     }
     image_view_min_lod = add_extension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
     supports_memory_budget = add_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
@@ -503,7 +510,14 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceImageViewMinLodFeaturesEXT{
             .minLod = true,
         },
+        vk::PhysicalDeviceFaultFeaturesEXT{
+            .deviceFault = true,
+        },
     };
+
+    if (!device_fault) {
+        device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
+    }
 
     if (!custom_border_color) {
         device_chain.unlink<vk::PhysicalDeviceCustomBorderColorFeaturesEXT>();
@@ -795,6 +809,70 @@ vk::Format Instance::GetSupportedFormat(const vk::Format format,
         }
     }
     return format;
+}
+
+static const char* FaultAddressTypeName(u32 type) {
+    switch (type) {
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT:
+        return "invalid read";
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT:
+        return "invalid write";
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT:
+        return "invalid execute";
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT:
+        return "instruction pointer (unknown)";
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT:
+        return "instruction pointer (invalid)";
+    case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT:
+        return "instruction pointer (faulted)";
+    default:
+        return "none";
+    }
+}
+
+void Instance::ReportDeviceFault() const {
+    if (!device_fault) {
+        LOG_CRITICAL(Render_Vulkan,
+                     "Device lost. VK_EXT_device_fault is unavailable, no details to give.");
+        return;
+    }
+
+    VkDeviceFaultCountsEXT counts{};
+    counts.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT;
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT(static_cast<VkDevice>(*device),
+                                                              &counts, nullptr) != VK_SUCCESS) {
+        LOG_CRITICAL(Render_Vulkan, "Device lost. The fault counts could not be read.");
+        return;
+    }
+    counts.vendorBinarySize = 0;
+
+    std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+
+    VkDeviceFaultInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT;
+    info.pAddressInfos = addresses.empty() ? nullptr : addresses.data();
+    info.pVendorInfos = vendors.empty() ? nullptr : vendors.data();
+    info.pVendorBinaryData = nullptr;
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT(static_cast<VkDevice>(*device),
+                                                              &counts, &info) != VK_SUCCESS) {
+        LOG_CRITICAL(Render_Vulkan, "Device lost. The fault info could not be read.");
+        return;
+    }
+
+    LOG_CRITICAL(Render_Vulkan, "Device fault: {}", static_cast<const char*>(info.description));
+    for (u32 i = 0; i < counts.addressInfoCount; ++i) {
+        const VkDeviceFaultAddressInfoEXT& address = addresses[i];
+        LOG_CRITICAL(Render_Vulkan, "  {} at {:#018x}, precision {:#x}",
+                     FaultAddressTypeName(address.addressType), address.reportedAddress,
+                     address.addressPrecision);
+    }
+    for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
+        const VkDeviceFaultVendorInfoEXT& vendor = vendors[i];
+        LOG_CRITICAL(Render_Vulkan, "  vendor: {}, code {:#x}, data {:#x}",
+                     static_cast<const char*>(vendor.description), vendor.vendorFaultCode,
+                     vendor.vendorFaultData);
+    }
 }
 
 } // namespace Vulkan
