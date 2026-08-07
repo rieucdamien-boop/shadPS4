@@ -93,8 +93,9 @@ private:
     vk::UniqueQueryPool occlusion_pool;
     u32 occlusion_slot{};
     bool occlusion_active{};
+    vk::CommandBuffer occlusion_cmdbuf;
 
-        void PrepareRenderState(const GraphicsPipeline* pipeline);
+    void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     void Resolve();
     void DepthStencilCopy(bool is_depth, bool is_stencil);
