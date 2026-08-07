@@ -439,6 +439,14 @@ public:
         return supports_memory_budget;
     }
 
+    /// Returns true if VK_EXT_device_fault is usable.
+    bool IsDeviceFaultSupported() const {
+        return device_fault;
+    }
+
+    /// Logs what the driver recorded about the last device loss.
+    void ReportDeviceFault() const;
+
     /// Returns the amount of memory used.
     [[nodiscard]] u64 GetDeviceMemoryUsage() const;
 
@@ -519,6 +527,7 @@ private:
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
+    bool device_fault{};
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
     u64 total_memory_budget{};
