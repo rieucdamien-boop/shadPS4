@@ -335,6 +335,8 @@ bool Instance::CreateDevice() {
         LOG_INFO(Render_Vulkan, "- sampler2DViewOf3D: {}",
                  image_2d_view_of_3d_features.sampler2DViewOf3D);
     }
+    diagnostic_checkpoints =
+        add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
     device_fault = add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     if (device_fault) {
         const auto fault_features = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>();
@@ -872,6 +874,16 @@ void Instance::ReportDeviceFault() const {
         LOG_CRITICAL(Render_Vulkan, "  vendor: {}, code {:#x}, data {:#x}",
                      static_cast<const char*>(vendor.description), vendor.vendorFaultCode,
                      vendor.vendorFaultData);
+    }
+
+    if (!diagnostic_checkpoints) {
+        return;
+    }
+    const auto checkpoints = graphics_queue.getCheckpointDataNV();
+    for (const auto& checkpoint : checkpoints) {
+        LOG_CRITICAL(Render_Vulkan, "  breadcrumb: shader {:#x} reached stage {}",
+                     reinterpret_cast<u64>(checkpoint.pCheckpointMarker),
+                     vk::to_string(checkpoint.stage));
     }
 }
 
