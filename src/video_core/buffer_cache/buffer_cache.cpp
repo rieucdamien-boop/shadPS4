@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <limits>
 #include "common/alignment.h"
 #include "common/debug.h"
 #include "common/scope_exit.h"
@@ -62,6 +63,51 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     critical_gc_memory = static_cast<u64>(
         std::max<u64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
                       DEFAULT_CRITICAL_GC_MEMORY));
+
+    Vulkan::SetDeviceFaultAnnotator([this](u64 device_address) { ExplainAddress(device_address); });
+}
+
+void BufferCache::ExplainAddress(u64 device_address) {
+    // Called from the crash path only. Walks live buffers to say who owns the address the GPU
+    // died on: inside a buffer, just past one, or belonging to nothing at all.
+    u64 best_distance = std::numeric_limits<u64>::max();
+    Buffer* nearest = nullptr;
+    bool nearest_is_after = false;
+
+    for (Buffer& buffer : slot_buffers) {
+        if (buffer.is_deleted || !buffer.Handle()) {
+            continue;
+        }
+        const u64 begin = static_cast<u64>(buffer.BufferDeviceAddress());
+        if (begin == 0) {
+            continue;
+        }
+        const u64 end = begin + buffer.SizeBytes();
+        if (device_address >= begin && device_address < end) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "    inside live buffer [{:#018x}, {:#018x}) guest {:#x}, {:#x} in",
+                         begin, end, buffer.CpuAddr(), device_address - begin);
+            return;
+        }
+        const bool after = device_address >= end;
+        const u64 distance = after ? device_address - end : begin - device_address;
+        if (distance < best_distance) {
+            best_distance = distance;
+            nearest = &buffer;
+            nearest_is_after = after;
+        }
+    }
+
+    if (nearest == nullptr) {
+        LOG_CRITICAL(Render_Vulkan, "    no live buffer at all");
+        return;
+    }
+    const u64 begin = static_cast<u64>(nearest->BufferDeviceAddress());
+    LOG_CRITICAL(Render_Vulkan,
+                 "    owned by nobody. Nearest live buffer [{:#018x}, {:#018x}) guest {:#x}, "
+                 "{:#x} bytes {}",
+                 begin, begin + nearest->SizeBytes(), nearest->CpuAddr(), best_distance,
+                 nearest_is_after ? "past its end" : "before its start");
 }
 
 BufferCache::~BufferCache() = default;
