@@ -46,6 +46,11 @@ public:
     void DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 size, u32 max_count,
                       VAddr count_address);
 
+    /// Answers a guest pixel-pipe statistics dump, the mechanism behind occlusion queries.
+    /// Returns false when the query could not be serviced, in which case the caller keeps the
+    /// old invented counter.
+    bool OcclusionQueryDump(u64* results, s32 num_pairs);
+
     void DispatchDirect();
     void DispatchIndirect(VAddr address, u32 offset, u32 size);
 
@@ -85,7 +90,11 @@ public:
     }
 
 private:
-    void PrepareRenderState(const GraphicsPipeline* pipeline);
+    vk::UniqueQueryPool occlusion_pool;
+    u32 occlusion_slot{};
+    bool occlusion_active{};
+
+        void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     void Resolve();
     void DepthStencilCopy(bool is_depth, bool is_stencil);
