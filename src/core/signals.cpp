@@ -110,6 +110,26 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
                          ctx->Rbx, ctx->Rcx, ctx->Rdx);
             LOG_CRITICAL(Debug, "  rsi={:#018x} rdi={:#018x} rbp={:#018x} rsp={:#018x}", ctx->Rsi,
                          ctx->Rdi, ctx->Rbp, ctx->Rsp);
+            // Which address was touched, and whose code touched it. Without the module the
+            // faulting RIP is just a number; with it, a crash inside the C runtime called from
+            // the GPU path is immediately distinguishable from one in our own code.
+            if (pExp->ExceptionRecord->NumberParameters >= 2) {
+                const u64 fault_addr =
+                    static_cast<u64>(pExp->ExceptionRecord->ExceptionInformation[1]);
+                const bool is_write = pExp->ExceptionRecord->ExceptionInformation[0] == 1;
+                LOG_CRITICAL(Debug, "  faulting {} of {:#018x}", is_write ? "write" : "read",
+                             fault_addr);
+            }
+            HMODULE module = nullptr;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCSTR>(address), &module) != 0) {
+                char path[MAX_PATH]{};
+                if (GetModuleFileNameA(module, path, MAX_PATH) != 0) {
+                    LOG_CRITICAL(Debug, "  in module {} at +{:#x}", path,
+                                 reinterpret_cast<u64>(address) - reinterpret_cast<u64>(module));
+                }
+            }
             const auto* red = reinterpret_cast<const u64*>(ctx->Rsp - 128);
             for (u32 i = 0; i < 16; i += 2) {
                 LOG_CRITICAL(Debug, "  [rsp-{:#05x}] {:#018x}   [rsp-{:#05x}] {:#018x}",
