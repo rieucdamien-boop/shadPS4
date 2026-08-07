@@ -444,6 +444,11 @@ public:
         return device_fault;
     }
 
+    /// Returns true if draw breadcrumbs can be recorded.
+    bool IsDiagnosticCheckpointsSupported() const {
+        return diagnostic_checkpoints;
+    }
+
     /// Logs what the driver recorded about the last device loss.
     void ReportDeviceFault() const;
 
@@ -528,6 +533,7 @@ private:
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool device_fault{};
+    bool diagnostic_checkpoints{};
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
     u64 total_memory_budget{};
