@@ -146,6 +146,9 @@ public:
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
 
+    /// Says which live buffer, if any, owns a GPU address the driver faulted on.
+    void ExplainAddress(u64 device_address);
+
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);
 
