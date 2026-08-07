@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -230,6 +231,11 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+    if (instance.IsDiagnosticCheckpointsSupported()) {
+        // Leaves a breadcrumb the driver can hand back if the device dies mid-draw.
+        const u64 marker = static_cast<u64>(pipeline->GetGraphicsKey().stage_hashes[0]);
+        cmdbuf.setCheckpointNV(reinterpret_cast<const void*>(marker));
+    }
 
     if (is_indexed) {
         cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
@@ -352,7 +358,9 @@ void Rasterizer::CloseOcclusionQuery() {
 }
 
 bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
-    if (results == nullptr || num_pairs <= 0) {
+    // Escape hatch for bisecting: SHADPS4_NO_OCCLUSION=1 falls back to the invented counter.
+    static const bool disabled = std::getenv("SHADPS4_NO_OCCLUSION") != nullptr;
+    if (disabled || results == nullptr || num_pairs <= 0) {
         return false;
     }
     if (occlusion_aborted) {
