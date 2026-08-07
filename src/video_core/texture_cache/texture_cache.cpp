@@ -185,6 +185,13 @@ void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
 
     ImageIds deleted_images;
     ForEachImageInRegion(cpu_addr, size, [&](ImageId id, Image&) { deleted_images.push_back(id); });
+    if (deleted_images.empty()) {
+        return;
+    }
+    // The guest is taking this memory back. Anything still on the GPU may be drawing into these
+    // images right now, and a render target whose memory goes away faults the device. Let the
+    // queue drain before letting go of them.
+    scheduler.Finish();
     for (const ImageId id : deleted_images) {
         // TODO: Download image data back to host.
         FreeImage(id);
