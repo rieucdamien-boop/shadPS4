@@ -99,7 +99,6 @@ static Id FoldRuntimeOffset(EmitContext& ctx, const EmitContext::TextureDefiniti
     if (offset.IsEmpty() || offset.IsImmediate()) {
         return Id{};
     }
-    }
     if (const IR::Inst* const inst = offset.InstRecursive();
         inst != nullptr && inst->AreAllArgsImmediates()) {
         // Constant offsets are already handled by AddOffset via ConstOffset.
