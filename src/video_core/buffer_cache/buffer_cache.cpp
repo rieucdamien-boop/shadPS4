@@ -85,8 +85,8 @@ void BufferCache::ExplainAddress(u64 device_address) {
         const u64 end = begin + buffer.SizeBytes();
         if (device_address >= begin && device_address < end) {
             LOG_CRITICAL(Render_Vulkan,
-                         "    inside live buffer [{:#018x}, {:#018x}) guest {:#x}, {:#x} in",
-                         begin, end, buffer.CpuAddr(), device_address - begin);
+                         "    inside live buffer [{:#018x}, {:#018x}) guest {:#x}, {:#x} in", begin,
+                         end, buffer.CpuAddr(), device_address - begin);
             return;
         }
         const bool after = device_address >= end;
