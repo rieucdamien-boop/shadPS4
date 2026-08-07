@@ -106,7 +106,20 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
                                                   download, download_size);
     } else {
         scheduler.DeferPriorityOperation(
-            [this, device_addr = image.info.guest_address, download, download_size] {
+            [this, image_id, device_addr = image.info.guest_address, download, download_size] {
+                // Check the image is still the one we were asked to write back. This runs on the
+                // priority pending-operations thread at an unspecified later time, and the guest
+                // is free to unregister the image and reuse that memory for anything at all in
+                // between. Pouring pixels over live guest data corrupts it in the most confusing
+                // way there is: the bytes look like perfectly plausible floats, so the first
+                // symptom is a virtual call through a vtable pointer that is really part of a
+                // texture.
+                const Image& current = slot_images[image_id];
+                if (False(current.flags & ImageFlagBits::Registered) ||
+                    current.info.guest_address != device_addr ||
+                    current.info.guest_size < download_size) {
+                    return;
+                }
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr), download,
                                                           download_size);
             });
