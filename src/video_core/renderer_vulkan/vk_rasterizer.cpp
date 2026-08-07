@@ -338,6 +338,17 @@ static constexpr u64 OcclusionValidMask = 0x8000000000000000ULL;
 static constexpr u64 OcclusionAssumeVisible = 0x2FFFFFFULL;
 
 bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
+    // Disabled pending scheduler support. Vulkan requires a query opened with vkCmdBeginQuery to
+    // be closed in the same command buffer, and nothing here can stop the scheduler submitting
+    // between the guest's two statistics dumps. When that happens the query is submitted without
+    // ever being ended - invalid usage, and the driver drops the device. The check below catches
+    // it, but only after the offending submission has already gone out.
+    //
+    // Doing this properly means closing any open query from the scheduler just before it
+    // submits, which is a change to vk_scheduler rather than to this file. Until then, answer
+    // false and let the caller keep the invented counter: lens flares draw through walls again,
+    // which is a great deal better than the device being lost.
+    return false;
     if (results == nullptr || num_pairs <= 0) {
         return false;
     }
