@@ -71,6 +71,7 @@ Channel* channel = nullptr;
 HANDLE channel_map = nullptr;
 HANDLE helper_process = nullptr;
 std::atomic<bool> active{false};
+std::atomic<bool> draining{false};
 
 std::wstring ChannelName(u32 pid) {
     return L"shadps4-fault-channel-" + std::to_wstring(pid);
@@ -135,6 +136,21 @@ bool Start() {
         if (channel->dropped.load(std::memory_order_acquire) == 1) {
             channel->dropped.store(0, std::memory_order_release);
             active.store(true, std::memory_order_release);
+            // The helper makes the page writable at once and leaves the invalidation to us,
+            // so between the two there is a window where the GPU can read what the guest has
+            // already overwritten. Draining only on draw leaves that window open for every
+            // other path into guest memory - indirect draws, dispatches, texture uploads. A
+            // dedicated thread closes it to about a millisecond, whatever the path.
+            CreateThread(
+                nullptr, 0,
+                [](LPVOID) -> DWORD {
+                    while (active.load(std::memory_order_relaxed)) {
+                        Drain();
+                        Sleep(1);
+                    }
+                    return 0;
+                },
+                nullptr, 0, nullptr);
             LOG_INFO(Core, "Fault helper attached; guest faults will not touch the red zone");
             return true;
         }
@@ -151,6 +167,10 @@ bool Start() {
 
 void Drain() {
     if (!active.load(std::memory_order_relaxed) || channel == nullptr) {
+        return;
+    }
+    bool expected = false;
+    if (!draining.compare_exchange_strong(expected, true, std::memory_order_acquire)) {
         return;
     }
     const auto* signals = Signals::Instance();
@@ -172,6 +192,7 @@ void Drain() {
         signals->DispatchAccessViolation(&pointers, reinterpret_cast<void*>(entry.address));
     }
     channel->tail.store(tail, std::memory_order_release);
+    draining.store(false, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
