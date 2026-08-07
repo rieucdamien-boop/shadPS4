@@ -94,6 +94,8 @@ private:
     u32 occlusion_slot{};
     bool occlusion_active{};
     vk::CommandBuffer occlusion_cmdbuf;
+    u32 occlusion_prev_slot{};
+    bool occlusion_prev_valid{};
 
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
