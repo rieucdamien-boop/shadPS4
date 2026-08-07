@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+
 #include <boost/container/small_vector.hpp>
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
@@ -149,6 +151,15 @@ public:
     /// Says which live buffer, if any, owns a GPU address the driver faulted on.
     void ExplainAddress(u64 device_address);
 
+    /// Ring of recently destroyed buffers, kept only so a crash can name a dangling address.
+    struct DeadBuffer {
+        u64 begin;
+        u64 end;
+        VAddr cpu_addr;
+        u64 tick;
+    };
+    static constexpr size_t NumDeadBuffers = 512;
+
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);
 
@@ -224,6 +235,8 @@ private:
     RangeSet gpu_modified_ranges;
     SplitRangeMap<BufferId> buffer_ranges;
     PageTable page_table;
+    std::array<DeadBuffer, NumDeadBuffers> dead_buffers{};
+    size_t dead_buffer_index = 0;
 };
 
 } // namespace VideoCore
