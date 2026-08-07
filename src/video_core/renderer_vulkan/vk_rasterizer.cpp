@@ -1077,7 +1077,7 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size) {
 // lock granularity (PAGES_PER_LOCK == NUM_PAGES_PER_REGION in page_manager.h), so a region-aligned
 // invalidation touches exactly one lock instead of straddling several, and a long sequential guest
 // write collapses into a single fault per region instead of one per arbitrary sub-slice.
-static constexpr u64 WideFaultGranule = VideoCore::TRACKER_HIGHER_PAGE_SIZE;
+static constexpr u64 WideFaultGranule = VideoCore::TRACKER_BYTES_PER_PAGE;
 
 bool Rasterizer::InvalidateMemoryFromCpuFault(VAddr addr) {
     // This region just cost the guest a fault, so stop re-protecting it from now on. Setting
