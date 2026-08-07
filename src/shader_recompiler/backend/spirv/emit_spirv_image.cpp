@@ -88,8 +88,17 @@ struct ImageOperands {
 /// the existing warning path.
 static Id FoldRuntimeOffset(EmitContext& ctx, const EmitContext::TextureDefinition& texture,
                             Id image, Id coords, const IR::Value& offset) {
+    // Disabled. Folding a runtime texel offset into normalised coordinates is an
+    // approximation: it is applied before address wrapping rather than after, and it assumes
+    // the sampler behaves the same for a fractional coordinate as for an exact texel index.
+    // That holds for the blur and post-process shaders it was written for, but not for a
+    // glyph atlas, where being a fraction of a texel off smears characters into each other.
+    // CUSA00049 corrupts every piece of on-screen text with this enabled. Until the offset can
+    // be applied exactly, fall back to the upstream behaviour of dropping it with a warning.
+    return Id{};
     if (offset.IsEmpty() || offset.IsImmediate()) {
         return Id{};
+    }
     }
     if (const IR::Inst* const inst = offset.InstRecursive();
         inst != nullptr && inst->AreAllArgsImmediates()) {
