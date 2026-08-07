@@ -13,6 +13,10 @@
 #define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <mutex>
 #include <vector>
 #include <fmt/ranges.h>
 
@@ -32,9 +36,78 @@ namespace Vulkan {
 static const char* const VALIDATION_LAYER_NAME = "VK_LAYER_KHRONOS_validation";
 static const char* const CRASH_DIAGNOSTIC_LAYER_NAME = "VK_LAYER_LUNARG_crash_diagnostic";
 
+namespace {
+struct AddressBindingRecord {
+    u64 base;
+    u64 size;
+    u64 handle;
+    u32 object_type;
+    bool bound;
+    u64 seq;
+};
+constexpr size_t NumAddressRecords = 16384;
+std::array<AddressBindingRecord, NumAddressRecords> g_address_records{};
+std::atomic<u64> g_address_seq{0};
+std::mutex g_address_mutex;
+} // namespace
+
+void ExplainDeviceAddress(u64 address) {
+    std::vector<AddressBindingRecord> hits;
+    {
+        std::scoped_lock lk{g_address_mutex};
+        for (const auto& record : g_address_records) {
+            if (record.seq != 0 && address >= record.base && address < record.base + record.size) {
+                hits.push_back(record);
+            }
+        }
+    }
+    if (hits.empty()) {
+        LOG_CRITICAL(Render_Vulkan, "    no address binding was ever recorded for this range");
+        return;
+    }
+    std::sort(
+        hits.begin(), hits.end(),
+        [](const AddressBindingRecord& a, const AddressBindingRecord& b) { return a.seq > b.seq; });
+    const u64 latest = g_address_seq.load();
+    for (size_t i = 0; i < hits.size() && i < 4; ++i) {
+        const AddressBindingRecord& record = hits[i];
+        LOG_CRITICAL(Render_Vulkan,
+                     "    {} {} handle {:#x} over [{:#018x}, {:#018x}), event {} of {}",
+                     record.bound ? "BOUND" : "UNBOUND",
+                     vk::to_string(static_cast<vk::ObjectType>(record.object_type)), record.handle,
+                     record.base, record.base + record.size, record.seq, latest);
+    }
+}
+
 static VKAPI_ATTR VkBool32 VKAPI_CALL DebugUtilsCallback(
     vk::DebugUtilsMessageSeverityFlagBitsEXT severity, vk::DebugUtilsMessageTypeFlagsEXT type,
     const vk::DebugUtilsMessengerCallbackDataEXT* callback_data, void* user_data) {
+
+    if (type & vk::DebugUtilsMessageTypeFlagBitsEXT::eDeviceAddressBinding) {
+        // The driver is telling us which GPU address range an object just took or gave up.
+        // Record it silently; a crash will ask who owned the address it died on.
+        const auto* next = reinterpret_cast<const VkBaseInStructure*>(callback_data->pNext);
+        while (next != nullptr) {
+            if (next->sType == VK_STRUCTURE_TYPE_DEVICE_ADDRESS_BINDING_CALLBACK_DATA_EXT) {
+                const auto* binding =
+                    reinterpret_cast<const VkDeviceAddressBindingCallbackDataEXT*>(next);
+                AddressBindingRecord record{};
+                record.base = binding->baseAddress;
+                record.size = binding->size;
+                record.bound = binding->bindingType == VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT;
+                if (callback_data->objectCount > 0) {
+                    record.handle = callback_data->pObjects[0].objectHandle;
+                    record.object_type = static_cast<u32>(callback_data->pObjects[0].objectType);
+                }
+                record.seq = g_address_seq.fetch_add(1) + 1;
+                std::scoped_lock lk{g_address_mutex};
+                g_address_records[(record.seq - 1) % NumAddressRecords] = record;
+                break;
+            }
+            next = next->pNext;
+        }
+        return VK_FALSE;
+    }
 
     spdlog::level level{};
     switch (severity) {
@@ -430,7 +503,8 @@ vk::UniqueDebugUtilsMessengerEXT CreateDebugCallback(vk::Instance instance) {
                            vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose,
         .messageType = vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral |
                        vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation |
-                       vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance,
+                       vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance |
+                       vk::DebugUtilsMessageTypeFlagBitsEXT::eDeviceAddressBinding,
         .pfnUserCallback = DebugUtilsCallback,
     };
     auto [messenger_result, messenger] = instance.createDebugUtilsMessengerEXTUnique(msg_ci);
