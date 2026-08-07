@@ -681,6 +681,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                         static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
                         u64* results = event->Address<u64*>();
+                        // Let the rasterizer answer with a real occlusion query when it can.
+                        // When it cannot - null GPU, no command buffer, a pool that would not
+                        // allocate - fall through to the counter this used to invent, so the
+                        // behaviour is unchanged rather than merely different.
+                        if (rasterizer != nullptr &&
+                            rasterizer->OcclusionQueryDump(results, num_counter_pairs)) {
+                            break;
+                        }
                         for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
                             *results = pixel_counter | OcclusionCounterValidMask;
                         }
