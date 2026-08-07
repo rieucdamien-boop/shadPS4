@@ -98,6 +98,16 @@ void BufferCache::ExplainAddress(u64 device_address) {
         }
     }
 
+    for (const DeadBuffer& dead : dead_buffers) {
+        if (dead.begin != 0 && device_address >= dead.begin && device_address < dead.end) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "    USE AFTER FREE: was buffer [{:#018x}, {:#018x}) guest {:#x}, "
+                         "destroyed at tick {}, gpu is at tick {}",
+                         dead.begin, dead.end, dead.cpu_addr, dead.tick, scheduler.CurrentTick());
+            return;
+        }
+    }
+
     if (nearest == nullptr) {
         LOG_CRITICAL(Render_Vulkan, "    no live buffer at all");
         return;
@@ -927,6 +937,11 @@ void BufferCache::TouchBuffer(const Buffer& buffer) {
 
 void BufferCache::DeleteBuffer(BufferId buffer_id) {
     Buffer& buffer = slot_buffers[buffer_id];
+    if (const u64 begin = static_cast<u64>(buffer.BufferDeviceAddress()); begin != 0) {
+        dead_buffers[dead_buffer_index] = DeadBuffer{begin, begin + buffer.SizeBytes(),
+                                                     buffer.CpuAddr(), scheduler.CurrentTick()};
+        dead_buffer_index = (dead_buffer_index + 1) % NumDeadBuffers;
+    }
     Unregister(buffer_id);
     scheduler.DeferOperation([this, buffer_id] { slot_buffers.erase(buffer_id); });
     buffer.is_deleted = true;
