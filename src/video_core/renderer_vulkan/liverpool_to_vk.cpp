@@ -799,7 +799,7 @@ std::span<const DepthFormatInfo> DepthFormats() {
                               vk::Format::eD32SfloatS8Uint),
         // 16
         CreateDepthFormatInfo(ZFormat::Z16, StencilFormat::Invalid, vk::Format::eD16Unorm),
-        CreateDepthFormatInfo(ZFormat::Z16, StencilFormat::Stencil8, vk::Format::eD16UnormS8Uint),
+        CreateDepthFormatInfo(ZFormat::Z16, StencilFormat::Stencil8, vk::Format::eD32SfloatS8Uint),
         // 32_Float
         CreateDepthFormatInfo(ZFormat::Z32Float, StencilFormat::Invalid, vk::Format::eD32Sfloat),
         CreateDepthFormatInfo(ZFormat::Z32Float, StencilFormat::Stencil8,
