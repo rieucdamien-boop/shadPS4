@@ -323,6 +323,75 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     ResetBindings();
 }
 
+// The guest measures how many pixels of a draw survived the depth test by dumping the pixel
+// pipe statistics twice - once before the draw, once after - and summing the differences across
+// render backends. Lens flares are the classic user: the flare is drawn only if the light behind
+// it turned out to be visible.
+//
+// shadPS4 used to answer with a counter that grew by a fixed step on every dump, so every query
+// reported millions of pixels and every flare was drawn, walls included. Ask the GPU instead.
+//
+// Everything that cannot be serviced returns false and leaves the caller writing the old
+// invented counter, so no title can come out of this worse than it went in.
+static constexpr u32 NumOcclusionSlots = 64;
+static constexpr u64 OcclusionValidMask = 0x8000000000000000ULL;
+static constexpr u64 OcclusionAssumeVisible = 0x2FFFFFFULL;
+
+bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
+    if (results == nullptr || num_pairs <= 0) {
+        return false;
+    }
+    if (!occlusion_pool) {
+        const vk::QueryPoolCreateInfo info{
+            .queryType = vk::QueryType::eOcclusion,
+            .queryCount = NumOcclusionSlots,
+        };
+        auto [result, pool] = instance.GetDevice().createQueryPoolUnique(info);
+        if (result != vk::Result::eSuccess) {
+            return false;
+        }
+        occlusion_pool = std::move(pool);
+    }
+
+    const auto cmdbuf = scheduler.CommandBuffer();
+    if (!occlusion_active) {
+        // Opening dump. Report zero everywhere so that the difference the guest computes is
+        // exactly what the GPU is about to count.
+        cmdbuf.resetQueryPool(*occlusion_pool, occlusion_slot, 1);
+        cmdbuf.beginQuery(*occlusion_pool, occlusion_slot, vk::QueryControlFlags{});
+        occlusion_active = true;
+        for (s32 i = 0; i < num_pairs; ++i) {
+            results[i * 2] = OcclusionValidMask;
+        }
+        return true;
+    }
+
+    cmdbuf.endQuery(*occlusion_pool, occlusion_slot);
+    occlusion_active = false;
+    for (s32 i = 0; i < num_pairs; ++i) {
+        results[i * 2] = OcclusionValidMask;
+    }
+
+    const u32 slot = occlusion_slot;
+    occlusion_slot = (occlusion_slot + 1) % NumOcclusionSlots;
+    scheduler.DeferOperation([this, slot, results] {
+        u64 count = 0;
+        const auto result = instance.GetDevice().getQueryPoolResults(
+            *occlusion_pool, slot, 1, sizeof(count), &count, sizeof(count),
+            vk::QueryResultFlagBits::e64);
+        // Never block on the GPU here: this runs while work is being submitted, and waiting on
+        // a query from the very batch being submitted would deadlock. A result that is not
+        // ready yet falls back to the old assumption that the light is visible, which is what
+        // the emulator did unconditionally until now.
+        const u64 value =
+            (result == vk::Result::eSuccess ? count : OcclusionAssumeVisible) | OcclusionValidMask;
+        if (!memory->TryWriteBacking(results, &value, sizeof(value))) {
+            *results = value;
+        }
+    });
+    return true;
+}
+
 void Rasterizer::DispatchDirect() {
     // Apply anything the out-of-thread fault helper recorded since the last draw. It makes the
     // page writable immediately so the guest can continue, and leaves the invalidation to us;
