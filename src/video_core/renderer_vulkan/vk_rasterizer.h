@@ -51,6 +51,10 @@ public:
     /// old invented counter.
     bool OcclusionQueryDump(u64* results, s32 num_pairs);
 
+    /// Closes an occlusion query still open when the scheduler is about to submit. Vulkan
+    /// requires a query to end in the command buffer that opened it.
+    void CloseOcclusionQuery();
+
     void DispatchDirect();
     void DispatchIndirect(VAddr address, u32 offset, u32 size);
 
@@ -96,6 +100,7 @@ private:
     vk::CommandBuffer occlusion_cmdbuf;
     u32 occlusion_prev_slot{};
     bool occlusion_prev_valid{};
+    bool occlusion_aborted{};
 
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
