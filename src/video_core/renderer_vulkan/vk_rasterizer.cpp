@@ -387,23 +387,24 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
         results[i * 2] = OcclusionValidMask;
     }
 
-    const u32 slot = occlusion_slot;
-    occlusion_slot = (occlusion_slot + 1) % NumOcclusionSlots;
-    scheduler.DeferOperation([this, slot, results] {
-        u64 count = 0;
-        const auto result = instance.GetDevice().getQueryPoolResults(
-            *occlusion_pool, slot, 1, sizeof(count), &count, sizeof(count),
-            vk::QueryResultFlagBits::e64);
-        // Never block on the GPU here: this runs while work is being submitted, and waiting on
-        // a query from the very batch being submitted would deadlock. A result that is not
-        // ready yet falls back to the old assumption that the light is visible, which is what
-        // the emulator did unconditionally until now.
-        const u64 value =
-            (result == vk::Result::eSuccess ? count : OcclusionAssumeVisible) | OcclusionValidMask;
-        if (!memory->TryWriteBacking(results, &value, sizeof(value))) {
-            *results = value;
+    // Report the previous query rather than this one. These draws have not run yet, and the
+    // only way to answer with their result would be to write into guest memory from a deferred
+    // callback, long after the game may have reused that buffer for something else. Eight
+    // stray bytes in the wrong place corrupt the game far more surely than a flare reacting one
+    // query late, which nobody can see.
+    u64 count = OcclusionAssumeVisible;
+    if (occlusion_prev_valid) {
+        u64 previous = 0;
+        if (instance.GetDevice().getQueryPoolResults(
+                *occlusion_pool, occlusion_prev_slot, 1, sizeof(previous), &previous,
+                sizeof(previous), vk::QueryResultFlagBits::e64) == vk::Result::eSuccess) {
+            count = previous;
         }
-    });
+    }
+    occlusion_prev_slot = occlusion_slot;
+    occlusion_prev_valid = true;
+    occlusion_slot = (occlusion_slot + 1) % NumOcclusionSlots;
+    results[0] = count | OcclusionValidMask;
     return true;
 }
 
