@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <functional>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -813,6 +814,12 @@ vk::Format Instance::GetSupportedFormat(const vk::Format format,
     return format;
 }
 
+static std::function<void(u64)> g_fault_annotator;
+
+void SetDeviceFaultAnnotator(std::function<void(u64)> annotator) {
+    g_fault_annotator = std::move(annotator);
+}
+
 static const char* FaultAddressTypeName(u32 type) {
     switch (type) {
     case VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT:
@@ -868,6 +875,9 @@ void Instance::ReportDeviceFault() const {
         LOG_CRITICAL(Render_Vulkan, "  {} at {:#018x}, precision {:#x}",
                      FaultAddressTypeName(address.addressType), address.reportedAddress,
                      address.addressPrecision);
+        if (g_fault_annotator) {
+            g_fault_annotator(address.reportedAddress);
+        }
     }
     for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
         const VkDeviceFaultVendorInfoEXT& vendor = vendors[i];
