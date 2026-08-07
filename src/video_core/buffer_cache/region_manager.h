@@ -197,9 +197,9 @@ public:
                     // The guest already paid for a fault in this region since the last cycle,
                     // which proves it writes here after uploads. Pin what is dirty now instead
                     // of waiting for the counters to agree.
-                    pinned |= cleared;
+                    pinned.Clear();
                 } else {
-                    pinned |= cleared;
+                    pinned.Clear();
                 }
                 seen_twice |= cleared & seen_once;
                 seen_once |= cleared;
