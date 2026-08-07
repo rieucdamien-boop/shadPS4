@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <functional>
 #include <span>
 #include <unordered_map>
 
@@ -18,6 +19,9 @@ class WindowSDL;
 VK_DEFINE_HANDLE(VmaAllocator)
 
 namespace Vulkan {
+
+/// Installs a hook called with each faulting GPU address after a device loss.
+void SetDeviceFaultAnnotator(std::function<void(u64)> annotator);
 
 class Instance {
 public:
