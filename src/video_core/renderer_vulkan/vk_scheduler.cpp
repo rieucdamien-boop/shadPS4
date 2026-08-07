@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <mutex>
 #include "common/assert.h"
 #include "common/debug.h"
+#include "common/logging/log.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -195,7 +198,16 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
-    ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+    if (submit_result == vk::Result::eErrorDeviceLost) {
+        // The device is gone for good. Say why once, then stop instead of spinning forever.
+        static std::once_flag reported;
+        std::call_once(reported, [this] {
+            instance.ReportDeviceFault();
+            LOG_CRITICAL(Render_Vulkan, "Device lost during submit. Stopping.");
+            Common::Log::Flush();
+        });
+        std::_Exit(1);
+    }
 
     master_semaphore.Refresh();
     AllocateWorkerCommandBuffers();
