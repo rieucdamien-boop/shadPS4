@@ -161,6 +161,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 #endif
 
     EndRendering();
+        // Last chance to close anything that has to end in this command buffer.
+    if (pre_submit_callback) {
+        pre_submit_callback();
+    }
     Check(current_cmdbuf.end());
 
     const vk::Semaphore timeline = master_semaphore.Handle();
