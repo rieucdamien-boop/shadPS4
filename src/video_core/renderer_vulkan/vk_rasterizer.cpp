@@ -421,13 +421,17 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
     // callback, long after the game may have reused that buffer for something else. Eight
     // stray bytes in the wrong place corrupt the game far more surely than a flare reacting one
     // query late, which nobody can see.
-    u64 count = OcclusionAssumeVisible;
+    // Hold the last answer the driver gave us instead of claiming "visible" whenever the
+    // result is still in flight. Alternating between a real zero and an assumed maximum is
+    // what made flares blink on and off from one frame to the next.
+    u64 count = occlusion_last_count;
     if (occlusion_prev_valid) {
         u64 previous = 0;
         if (instance.GetDevice().getQueryPoolResults(
                 *occlusion_pool, occlusion_prev_slot, 1, sizeof(previous), &previous,
                 sizeof(previous), vk::QueryResultFlagBits::e64) == vk::Result::eSuccess) {
             count = previous;
+            occlusion_last_count = previous;
         }
     }
     occlusion_prev_slot = occlusion_slot;
