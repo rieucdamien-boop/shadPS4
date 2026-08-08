@@ -18,6 +18,7 @@
 #include <atomic>
 #include <limits>
 #include <mutex>
+#include <utility>
 #include <vector>
 #include <fmt/ranges.h>
 
@@ -69,6 +70,33 @@ void ExplainDeviceAddress(u64 address) {
                      "    no binding covers this address ({} events recorded, ring holds {}{})",
                      total, NumAddressRecords,
                      total > NumAddressRecords ? ", OLDEST WERE LOST" : "");
+        // Everything living near the address, so the reader can see what the hole sits between.
+        std::vector<std::pair<u64, AddressBindingRecord>> neighbours;
+        {
+            std::scoped_lock lk{g_address_mutex};
+            for (const auto& record : g_address_records) {
+                if (record.seq == 0) {
+                    continue;
+                }
+                const u64 end = record.base + record.size;
+                const u64 distance = end <= address          ? address - end
+                                     : record.base > address ? record.base - address
+                                                             : 0;
+                if (distance < 0x400000) {
+                    neighbours.emplace_back(distance, record);
+                }
+            }
+        }
+        std::sort(neighbours.begin(), neighbours.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (size_t i = 0; i < neighbours.size() && i < 12; ++i) {
+            const AddressBindingRecord& record = neighbours[i].second;
+            LOG_CRITICAL(Render_Vulkan,
+                         "    neighbour {:#x} away: {} {} handle {:#x} [{:#018x}, {:#018x})",
+                         neighbours[i].first, record.bound ? "BOUND" : "UNBOUND",
+                         vk::to_string(static_cast<vk::ObjectType>(record.object_type)),
+                         record.handle, record.base, record.base + record.size);
+        }
         AddressBindingRecord below{};
         AddressBindingRecord above{};
         u64 best_below = std::numeric_limits<u64>::max();
