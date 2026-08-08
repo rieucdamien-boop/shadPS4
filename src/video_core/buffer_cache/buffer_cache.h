@@ -160,6 +160,17 @@ public:
     };
     static constexpr size_t NumDeadBuffers = 512;
 
+    /// Ring of page table writes, so a crash can say whether a faulting address was ever
+    /// handed to a shader and for which guest page.
+    struct PagetableWrite {
+        u64 base;
+        u64 span;
+        u64 page_begin;
+        VAddr cpu_addr;
+        u64 seq;
+    };
+    static constexpr size_t NumPagetableWrites = 4096;
+
     /// Synchronizes all buffers in the specified range.
     void SynchronizeBuffersInRange(VAddr device_addr, u64 size);
 
@@ -237,6 +248,9 @@ private:
     PageTable page_table;
     std::array<DeadBuffer, NumDeadBuffers> dead_buffers{};
     size_t dead_buffer_index = 0;
+    std::array<PagetableWrite, NumPagetableWrites> pagetable_writes{};
+    size_t pagetable_write_index = 0;
+    u64 pagetable_write_seq = 0;
 };
 
 } // namespace VideoCore
