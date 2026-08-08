@@ -99,9 +99,8 @@ Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
     : instance{CreateInstance(window.GetWindowInfo().type, enable_validation,
                               enable_crash_diagnostic)},
       physical_devices{EnumeratePhysicalDevices(instance)} {
-    if (enable_validation) {
-        debug_callback = CreateDebugCallback(*instance);
-    }
+    // Always on: without it the driver cannot tell us who owned a faulting GPU address.
+    debug_callback = CreateDebugCallback(*instance);
     const std::size_t num_physical_devices = static_cast<u16>(physical_devices.size());
     ASSERT_MSG(num_physical_devices > 0, "No physical devices found");
     LOG_INFO(Render_Vulkan, "Found {} physical devices", num_physical_devices);
@@ -203,7 +202,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
         vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
         vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
-        vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceFaultFeaturesEXT>();
+        vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceFaultFeaturesEXT,
+        vk::PhysicalDeviceAddressBindingReportFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -335,6 +335,13 @@ bool Instance::CreateDevice() {
                  image_2d_view_of_3d_features.sampler2DViewOf3D);
     }
     diagnostic_checkpoints = add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    address_binding_report = add_extension(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
+    if (address_binding_report) {
+        address_binding_report =
+            feature_chain.get<vk::PhysicalDeviceAddressBindingReportFeaturesEXT>()
+                .reportAddressBinding;
+        LOG_INFO(Render_Vulkan, "- reportAddressBinding: {}", address_binding_report);
+    }
     device_fault = add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     if (device_fault) {
         const auto fault_features = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>();
@@ -513,7 +520,14 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceFaultFeaturesEXT{
             .deviceFault = true,
         },
+        vk::PhysicalDeviceAddressBindingReportFeaturesEXT{
+            .reportAddressBinding = true,
+        },
     };
+
+    if (!address_binding_report) {
+        device_chain.unlink<vk::PhysicalDeviceAddressBindingReportFeaturesEXT>();
+    }
 
     if (!device_fault) {
         device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
@@ -872,6 +886,7 @@ void Instance::ReportDeviceFault() const {
         LOG_CRITICAL(Render_Vulkan, "  {} at {:#018x}, precision {:#x}",
                      FaultAddressTypeName(address.addressType), address.reportedAddress,
                      address.addressPrecision);
+        ExplainDeviceAddress(address.reportedAddress);
         if (g_fault_annotator) {
             g_fault_annotator(address.reportedAddress);
         }
