@@ -27,6 +27,9 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
 
 vk::UniqueDebugUtilsMessengerEXT CreateDebugCallback(vk::Instance instance);
 
+/// Logs which Vulkan object owned a GPU address, from the driver's own binding reports.
+void ExplainDeviceAddress(u64 address);
+
 template <typename T>
 concept VulkanHandleType = vk::isVulkanHandleType<T>::value;
 
