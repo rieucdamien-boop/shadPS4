@@ -1501,7 +1501,7 @@ void Rasterizer::UpdateDepthStencilState() const {
         static std::set<u64> seen_stencil;
         const u64 key = (u64(front.stencil_write_mask) << 24) | (u64(front.stencil_mask) << 16) |
                         (u64(front.stencil_test_val) << 8) |
-                        u64(regs.depth_control.stencil_ref_func.Value());
+                        u64(regs.depth_control.stencil_ref_func));
         bool is_new = false;
         {
             std::scoped_lock lk{stencil_mutex};
@@ -1513,8 +1513,8 @@ void Rasterizer::UpdateDepthStencilState() const {
                      "pass op {}",
                      stencil_clear ? 0U : front.stencil_write_mask, front.stencil_mask,
                      front.stencil_test_val,
-                     static_cast<u32>(regs.depth_control.stencil_ref_func.Value()), stencil_clear,
-                     static_cast<u32>(regs.stencil_control.stencil_zpass_front.Value()));
+                     static_cast<u32>(regs.depth_control.stencil_ref_func), stencil_clear,
+                     static_cast<u32>(regs.stencil_control.stencil_zpass_front));
         }
     }
 }
