@@ -538,6 +538,7 @@ private:
     bool image_view_min_lod{};
     bool device_fault{};
     bool diagnostic_checkpoints{};
+    bool address_binding_report{};
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
     u64 total_memory_budget{};
