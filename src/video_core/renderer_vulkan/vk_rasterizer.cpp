@@ -1494,6 +1494,28 @@ void Rasterizer::UpdateDepthStencilState() const {
         dynamic_state.SetStencilWriteMasks(!stencil_clear ? front.stencil_write_mask : 0U,
                                            !stencil_clear ? back.stencil_write_mask : 0U);
         dynamic_state.SetStencilCompareMasks(front.stencil_mask, back.stencil_mask);
+
+        // Does anything ever write the stencil buffer? The deferred lighting passes only light
+        // pixels where stencil equals one, so an empty stencil buffer means an unlit scene.
+        static std::mutex stencil_mutex;
+        static std::set<u64> seen_stencil;
+        const u64 key = (u64(front.stencil_write_mask) << 24) | (u64(front.stencil_mask) << 16) |
+                        (u64(front.stencil_test_val) << 8) |
+                        u64(regs.depth_control.stencil_ref_func.Value());
+        bool is_new = false;
+        {
+            std::scoped_lock lk{stencil_mutex};
+            is_new = seen_stencil.insert(key).second;
+        }
+        if (is_new) {
+            LOG_INFO(Render_Vulkan,
+                     "Stencil: write mask {:#x}, compare mask {:#x}, ref {}, func {}, clear {}, "
+                     "pass op {}",
+                     stencil_clear ? 0U : front.stencil_write_mask, front.stencil_mask,
+                     front.stencil_test_val,
+                     static_cast<u32>(regs.depth_control.stencil_ref_func.Value()), stencil_clear,
+                     static_cast<u32>(regs.stencil_control.stencil_zpass_front.Value()));
+        }
     }
 }
 
