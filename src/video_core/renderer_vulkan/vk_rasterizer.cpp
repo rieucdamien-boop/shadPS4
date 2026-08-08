@@ -432,6 +432,16 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
                 sizeof(previous), vk::QueryResultFlagBits::e64) == vk::Result::eSuccess) {
             count = previous;
             occlusion_last_count = previous;
+            // Are we ever told something is hidden? If every answer is a big number the query
+            // is not measuring what we think it is, and flares will always show through walls.
+            static u32 sample_tick = 0;
+            static u64 seen_zero = 0;
+            static u64 seen_nonzero = 0;
+            (previous == 0 ? seen_zero : seen_nonzero)++;
+            if ((++sample_tick % 600) == 0) {
+                LOG_INFO(Render_Vulkan, "Occlusion so far: {} hidden, {} visible, last {}",
+                         seen_zero, seen_nonzero, previous);
+            }
         }
     }
     occlusion_prev_slot = occlusion_slot;
