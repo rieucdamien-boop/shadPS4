@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <limits>
 #include <mutex>
 #include <vector>
 #include <fmt/ranges.h>
@@ -45,7 +46,7 @@ struct AddressBindingRecord {
     bool bound;
     u64 seq;
 };
-constexpr size_t NumAddressRecords = 16384;
+constexpr size_t NumAddressRecords = 262144;
 std::array<AddressBindingRecord, NumAddressRecords> g_address_records{};
 std::atomic<u64> g_address_seq{0};
 std::mutex g_address_mutex;
@@ -61,14 +62,54 @@ void ExplainDeviceAddress(u64 address) {
             }
         }
     }
+    const u64 total = g_address_seq.load();
     if (hits.empty()) {
-        LOG_CRITICAL(Render_Vulkan, "    no address binding was ever recorded for this range");
+        // Say whether we heard nothing at all, or heard plenty and this address was in none of it.
+        LOG_CRITICAL(Render_Vulkan,
+                     "    no binding covers this address ({} events recorded, ring holds {}{})",
+                     total, NumAddressRecords,
+                     total > NumAddressRecords ? ", OLDEST WERE LOST" : "");
+        AddressBindingRecord below{};
+        AddressBindingRecord above{};
+        u64 best_below = std::numeric_limits<u64>::max();
+        u64 best_above = std::numeric_limits<u64>::max();
+        {
+            std::scoped_lock lk{g_address_mutex};
+            for (const auto& record : g_address_records) {
+                if (record.seq == 0) {
+                    continue;
+                }
+                const u64 end = record.base + record.size;
+                if (end <= address && address - end < best_below) {
+                    best_below = address - end;
+                    below = record;
+                }
+                if (record.base > address && record.base - address < best_above) {
+                    best_above = record.base - address;
+                    above = record;
+                }
+            }
+        }
+        if (below.seq != 0) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "    nearest below: {} {} [{:#018x}, {:#018x}), {:#x} lower",
+                         below.bound ? "BOUND" : "UNBOUND",
+                         vk::to_string(static_cast<vk::ObjectType>(below.object_type)), below.base,
+                         below.base + below.size, best_below);
+        }
+        if (above.seq != 0) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "    nearest above: {} {} [{:#018x}, {:#018x}), {:#x} higher",
+                         above.bound ? "BOUND" : "UNBOUND",
+                         vk::to_string(static_cast<vk::ObjectType>(above.object_type)), above.base,
+                         above.base + above.size, best_above);
+        }
         return;
     }
     std::sort(
         hits.begin(), hits.end(),
         [](const AddressBindingRecord& a, const AddressBindingRecord& b) { return a.seq > b.seq; });
-    const u64 latest = g_address_seq.load();
+    const u64 latest = total;
     for (size_t i = 0; i < hits.size() && i < 4; ++i) {
         const AddressBindingRecord& record = hits[i];
         LOG_CRITICAL(Render_Vulkan,
