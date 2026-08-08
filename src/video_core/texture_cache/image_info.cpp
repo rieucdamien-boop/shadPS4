@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <mutex>
+#include <set>
+
 #include "common/assert.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/buffer.h"
@@ -60,6 +63,24 @@ ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
     tile_mode = buffer.GetTileMode();
     array_mode = AmdGpu::GetArrayMode(tile_mode);
     pixel_format = LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
+    // Inventory of every render target format the game actually asks for, once each. The
+    // startup capability list says what the GPU cannot do; this says what the game wants.
+    {
+        static std::mutex seen_mutex;
+        static std::set<u32> seen_formats;
+        const u32 key = (static_cast<u32>(buffer.GetDataFmt()) << 8) |
+                        static_cast<u32>(buffer.GetNumberFmt());
+        bool is_new = false;
+        {
+            std::scoped_lock lk{seen_mutex};
+            is_new = seen_formats.insert(key).second;
+        }
+        if (is_new) {
+            LOG_INFO(Render_Vulkan, "Game render target format: data={} number={} -> {}",
+                     static_cast<u32>(buffer.GetDataFmt()),
+                     static_cast<u32>(buffer.GetNumberFmt()), vk::to_string(pixel_format));
+        }
+    }
     num_samples = buffer.NumSamples();
     num_bits = NumBitsPerBlock(buffer.GetDataFmt());
     type = AmdGpu::ImageType::Color2D;
