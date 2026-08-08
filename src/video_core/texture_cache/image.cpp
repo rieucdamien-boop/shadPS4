@@ -463,6 +463,13 @@ static std::pair<u32, u32> SanitizeCopyLayers(const ImageInfo& src_info, const I
     if (vk_src_type == vk_dst_type) {
         if (src_layers != dst_layers) {
             LOG_WARNING(Render_Vulkan,
+                        "Coercing layers {}->{}: src {}x{} {} guest {:#x} | dst {}x{} {} guest "
+                        "{:#x}. Dropping data.",
+                        src_layers, dst_layers, src_info.size.width, src_info.size.height,
+                        vk::to_string(src_info.pixel_format), src_info.guest_address,
+                        dst_info.size.width, dst_info.size.height,
+                        vk::to_string(dst_info.pixel_format), dst_info.guest_address);
+            LOG_WARNING(Render_Vulkan,
                         "Coercing copy source layers {} and destination layers {} to minimum.",
                         src_layers, dst_layers);
             src_layers = dst_layers = std::min(src_layers, dst_layers);
