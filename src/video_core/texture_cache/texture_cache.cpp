@@ -78,6 +78,13 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
                               image.info.resources.layers * (image.info.num_bits / 8);
     ASSERT(download_size <= image.info.guest_size);
     const auto [download, offset] = download_buffer.Map(download_size);
+    if (download == nullptr) {
+        // Same trap as the buffer path: copying into a staging allocation that was never made
+        // writes past the end of the download buffer and faults the device.
+        LOG_WARNING(Render_Vulkan, "Skipping a {:#x} byte image readback, staging is too small",
+                    download_size);
+        return;
+    }
     download_buffer.Commit();
     const vk::BufferImageCopy image_download = {
         .bufferOffset = offset,
