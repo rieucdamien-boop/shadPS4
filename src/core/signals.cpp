@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string>
+#include <fmt/format.h>
 #include "common/arch.h"
 #include "common/assert.h"
 #include "common/decoder.h"
@@ -130,6 +132,33 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
                                  reinterpret_cast<u64>(address) - reinterpret_cast<u64>(module));
                 }
             }
+            // The guest code is decrypted in memory and nowhere on disk, so print the bytes of
+            // the faulting instruction. Without them the crash is an address with no meaning.
+            {
+                const auto* code_bytes = reinterpret_cast<const u8*>(ctx->Rip);
+                std::string before;
+                std::string at;
+                for (int i = -16; i < 0; ++i) {
+                    before += fmt::format("{:02x} ", code_bytes[i]);
+                }
+                for (int i = 0; i < 24; ++i) {
+                    at += fmt::format("{:02x} ", code_bytes[i]);
+                }
+                LOG_CRITICAL(Debug, "  bytes before rip: {}", before);
+                LOG_CRITICAL(Debug, "  bytes at rip    : {}", at);
+            }
+            // Whatever the pointer registers point at, so a corrupted object shows its contents.
+            const auto dump_around = [](const char* name, u64 value) {
+                if (value < 0x1000 || value >= 0x0000800000000000ULL) {
+                    return;
+                }
+                const auto* words = reinterpret_cast<const u64*>(value & ~7ULL);
+                LOG_CRITICAL(Debug, "  [{}] {:#018x} {:#018x} {:#018x} {:#018x}", name, words[0],
+                             words[1], words[2], words[3]);
+            };
+            dump_around("rbx", ctx->Rbx);
+            dump_around("rsi", ctx->Rsi);
+            dump_around("rdi", ctx->Rdi);
             const auto* red = reinterpret_cast<const u64*>(ctx->Rsp - 128);
             for (u32 i = 0; i < 16; i += 2) {
                 LOG_CRITICAL(Debug, "  [rsp-{:#05x}] {:#018x}   [rsp-{:#05x}] {:#018x}",
