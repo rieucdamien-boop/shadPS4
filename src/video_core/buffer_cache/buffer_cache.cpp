@@ -177,6 +177,14 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
         return;
     }
     const auto [download, offset] = download_buffer.Map(total_size_bytes);
+    if (download == nullptr) {
+        // The staging ring cannot hold this much. Recording the copy anyway makes the GPU write
+        // past the end of the download buffer, which faults the device and kills the frame.
+        // Losing a readback costs stale data; losing the device costs the session.
+        LOG_WARNING(Render_Vulkan, "Skipping a {:#x} byte buffer readback, staging is too small",
+                    total_size_bytes);
+        return;
+    }
     for (auto& copy : copies) {
         // Modify copies to have the staging offset in mind
         copy.dstOffset += offset;
