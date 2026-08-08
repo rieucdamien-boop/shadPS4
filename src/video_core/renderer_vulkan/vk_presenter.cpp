@@ -697,6 +697,25 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
     return {};
 }
 
+/// The format ConvertPixelFormat gives an image created from the video out attribute. The
+/// reinterpreting view above only makes sense over exactly that. When the guest renders straight
+/// into its display buffer with its own colour targets the image is whatever format those targets
+/// used, the channels are already in order, and swapping them turns blue scenes orange.
+static vk::Format GetVideoOutImageFormat(const Libraries::VideoOut::PixelFormat format) {
+    switch (format) {
+    case Libraries::VideoOut::PixelFormat::A8B8G8R8Srgb:
+    case Libraries::VideoOut::PixelFormat::A8R8G8B8Srgb:
+        return vk::Format::eR8G8B8A8Srgb;
+    case Libraries::VideoOut::PixelFormat::A2R10G10B10:
+    case Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb:
+    case Libraries::VideoOut::PixelFormat::A2R10G10B10Bt2020Pq:
+        return vk::Format::eA2B10G10R10UnormPack32;
+    default:
+        break;
+    }
+    return vk::Format::eUndefined;
+}
+
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
@@ -731,12 +750,15 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         .pImageMemoryBarriers = &pre_barrier,
     });
 
+    auto& image = texture_cache.GetImage(image_id);
+
     VideoCore::ImageViewInfo view_info{};
-    view_info.format = GetFrameViewFormat(attribute.attrib.pixel_format);
+    view_info.format =
+        image.info.pixel_format == GetVideoOutImageFormat(attribute.attrib.pixel_format)
+            ? GetFrameViewFormat(attribute.attrib.pixel_format)
+            : image.info.pixel_format;
     // Exclude alpha from output frame to avoid blending with UI.
     view_info.mapping.a = vk::ComponentSwizzle::eOne;
-
-    auto& image = texture_cache.GetImage(image_id);
     auto image_view = *image.FindView(view_info).image_view;
     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
