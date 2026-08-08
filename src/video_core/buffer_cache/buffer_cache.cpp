@@ -98,6 +98,19 @@ void BufferCache::ExplainAddress(u64 device_address) {
         }
     }
 
+    for (const PagetableWrite& write : pagetable_writes) {
+        if (write.seq != 0 && device_address >= write.base &&
+            device_address < write.base + write.span) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "    HANDED TO SHADERS: page table entry for guest page {:#x} "
+                         "(buffer at guest {:#x}) covered [{:#018x}, {:#018x}), write {} of {}",
+                         write.page_begin + ((device_address - write.base) >> CACHING_PAGEBITS),
+                         write.cpu_addr, write.base, write.base + write.span, write.seq,
+                         pagetable_write_seq);
+            return;
+        }
+    }
+
     for (const DeadBuffer& dead : dead_buffers) {
         if (dead.begin != 0 && device_address >= dead.begin && device_address < dead.end) {
             LOG_CRITICAL(Render_Vulkan,
@@ -697,6 +710,15 @@ void BufferCache::ChangeRegister(BufferId buffer_id) {
         }
         WriteDataBuffer(bda_pagetable_buffer, page_begin * sizeof(vk::DeviceAddress),
                         bda_addrs.data(), bda_addrs.size() * sizeof(vk::DeviceAddress));
+        pagetable_writes[pagetable_write_index] = PagetableWrite{
+            static_cast<u64>(buffer.BufferDeviceAddress()), size_pages << CACHING_PAGEBITS,
+            page_begin, buffer.CpuAddr(), ++pagetable_write_seq};
+        pagetable_write_index = (pagetable_write_index + 1) % NumPagetableWrites;
+        if (size_pages << CACHING_PAGEBITS > size) {
+            LOG_WARNING(Render_Vulkan,
+                        "Page table for buffer {:#x} spans {:#x} but the buffer is only {:#x}",
+                        buffer.CpuAddr(), size_pages << CACHING_PAGEBITS, size);
+        }
         buffer_ranges.Add(buffer.CpuAddr(), buffer.SizeBytes(), buffer_id);
     } else {
         total_used_memory -= Common::AlignUp(size, CACHING_PAGESIZE);
