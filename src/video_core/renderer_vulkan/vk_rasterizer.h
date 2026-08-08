@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <unordered_map>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -101,9 +103,11 @@ private:
     u32 occlusion_prev_slot{};
     bool occlusion_prev_valid{};
     bool occlusion_aborted{};
-    // Last result the driver actually gave us. Reused when the next one is not ready yet,
-    // because answering "visible" in the meantime makes flares blink on and off.
-    u64 occlusion_last_count{0x2FFFFFFULL};
+    // Last result the driver gave us, per guest destination address. The game asks about many
+    // lights and each one owns a stable address, so a single shared value handed one light the
+    // answer meant for another - which is why flares kept showing through walls.
+    std::unordered_map<VAddr, u64> occlusion_history;
+    VAddr occlusion_pending_addr{};
 
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
