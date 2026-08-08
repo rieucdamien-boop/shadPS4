@@ -397,6 +397,8 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
         cmdbuf.beginQuery(*occlusion_pool, occlusion_slot, vk::QueryControlFlags{});
         occlusion_active = true;
         occlusion_cmdbuf = cmdbuf;
+        // Remember who this pair belongs to. The closing dump lands on the same light.
+        occlusion_pending_addr = reinterpret_cast<VAddr>(results);
         for (s32 i = 0; i < num_pairs; ++i) {
             results[i * 2] = OcclusionValidMask;
         }
@@ -424,14 +426,18 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
     // Hold the last answer the driver gave us instead of claiming "visible" whenever the
     // result is still in flight. Alternating between a real zero and an assumed maximum is
     // what made flares blink on and off from one frame to the next.
-    u64 count = occlusion_last_count;
+    // Answer with this light's own history, not with whatever the previous query measured.
+    const VAddr subject =
+        occlusion_pending_addr != 0 ? occlusion_pending_addr : reinterpret_cast<VAddr>(results);
+    const auto known = occlusion_history.find(subject);
+    u64 count = known != occlusion_history.end() ? known->second : OcclusionAssumeVisible;
     if (occlusion_prev_valid) {
         u64 previous = 0;
         if (instance.GetDevice().getQueryPoolResults(
                 *occlusion_pool, occlusion_prev_slot, 1, sizeof(previous), &previous,
                 sizeof(previous), vk::QueryResultFlagBits::e64) == vk::Result::eSuccess) {
             count = previous;
-            occlusion_last_count = previous;
+            occlusion_history[subject] = previous;
             // Are we ever told something is hidden? If every answer is a big number the query
             // is not measuring what we think it is, and flares will always show through walls.
             static u32 sample_tick = 0;
@@ -444,6 +450,7 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
             }
         }
     }
+    occlusion_pending_addr = 0;
     occlusion_prev_slot = occlusion_slot;
     occlusion_prev_valid = true;
     occlusion_slot = (occlusion_slot + 1) % NumOcclusionSlots;
