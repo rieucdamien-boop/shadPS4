@@ -312,7 +312,10 @@ GraphicsPipeline::GraphicsPipeline(
         if (color_scaled_min_max || alpha_scaled_min_max) {
             LOG_WARNING(
                 Render_Vulkan,
-                "Unimplemented use of min/max blend op with blend factor not equal to one.");
+                "Unimplemented min/max blend, attachment {}: colour {} src {} dst {} | alpha {} "
+                "src {} dst {}. Vulkan ignores the factors, so the result is wrong.",
+                i, vk::to_string(color_blend), vk::to_string(src_color), vk::to_string(dst_color),
+                vk::to_string(alpha_blend), vk::to_string(src_alpha), vk::to_string(dst_alpha));
         }
 
         attachments[i] = vk::PipelineColorBlendAttachmentState{
