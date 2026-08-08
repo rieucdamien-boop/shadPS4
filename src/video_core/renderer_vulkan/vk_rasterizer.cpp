@@ -1501,7 +1501,7 @@ void Rasterizer::UpdateDepthStencilState() const {
         static std::set<u64> seen_stencil;
         const u64 key = (u64(front.stencil_write_mask) << 24) | (u64(front.stencil_mask) << 16) |
                         (u64(front.stencil_test_val) << 8) |
-                        u64(regs.depth_control.stencil_ref_func));
+                        u64(regs.depth_control.stencil_ref_func);
         bool is_new = false;
         {
             std::scoped_lock lk{stencil_mutex};
