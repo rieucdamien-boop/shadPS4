@@ -101,6 +101,9 @@ private:
     u32 occlusion_prev_slot{};
     bool occlusion_prev_valid{};
     bool occlusion_aborted{};
+    // Last result the driver actually gave us. Reused when the next one is not ready yet,
+    // because answering "visible" in the meantime makes flares blink on and off.
+    u64 occlusion_last_count{0x2FFFFFFULL};
 
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
