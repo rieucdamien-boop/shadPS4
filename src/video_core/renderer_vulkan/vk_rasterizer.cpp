@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstdlib>
+#include <mutex>
+#include <set>
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -487,6 +489,24 @@ void Rasterizer::DispatchDirect() {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+    // A screen split cleanly in two horizontally is what a compute pass covering only part of
+    // its target looks like: workgroups are laid out in rows, so a short Y count leaves the
+    // bottom untouched. Record each distinct shape once.
+    {
+        static std::mutex shape_mutex;
+        static std::set<u64> seen_shapes;
+        const u64 shape = (u64(cs_program.dim_x) << 42) | (u64(cs_program.dim_y) << 21) |
+                          u64(cs_program.dim_z);
+        bool is_new = false;
+        {
+            std::scoped_lock lk{shape_mutex};
+            is_new = seen_shapes.insert(shape).second;
+        }
+        if (is_new) {
+            LOG_INFO(Render_Vulkan, "Compute dispatch {:#x}: {} x {} x {} groups", cs.pgm_hash,
+                     cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+        }
+    }
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     DebugState.IncDispatch();
 
