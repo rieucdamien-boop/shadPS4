@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <set>
+#include <string>
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -786,6 +787,46 @@ static u64 LightingShaderHash() {
     return hash;
 }
 
+// A RenderDoc capture of the Battlefield 4 tonemap pass showed one of its two parameter buffers
+// holding PM4 packets instead of floats: a SET_CONTEXT_REG header followed by registers 0x2fa to
+// 0x2fd, which are the viewport scale and offset. A post-process shader never reads the command
+// stream, so that binding points somewhere it should not.
+//
+// Report any guest buffer whose first dword looks like a SET_CONTEXT_REG packet - type 3, opcode
+// 0x69, one register - naming the shader and the binding so the extent of this can be seen across
+// a whole session rather than a single frame. Once per shader and slot; a real parameter buffer
+// starting with that exact bit pattern would be a remarkable coincidence, but it is possible, so
+// this reports rather than acts.
+static void LogSuspiciousBufferContents(const Shader::Info& stage, u32 index, VAddr base, u64 size,
+                                        Core::MemoryManager* memory) {
+    if (size < sizeof(u32) || !memory->IsValidGpuMapping(base, sizeof(u32))) {
+        return;
+    }
+    const u32 first = *reinterpret_cast<const u32*>(base);
+    const bool is_set_context_reg = (first >> 30) == 3 && (first & 0xFFFF) == 0x6900;
+    if (!is_set_context_reg) {
+        return;
+    }
+    static std::mutex seen_mutex;
+    static std::set<u64> seen;
+    const u64 key = stage.pgm_hash ^ (u64{index} << 56);
+    {
+        std::scoped_lock lk{seen_mutex};
+        if (!seen.insert(key).second) {
+            return;
+        }
+    }
+    const auto* dw = reinterpret_cast<const u32*>(base);
+    const u32 count = static_cast<u32>(std::min<u64>(size / sizeof(u32), 4));
+    std::string head;
+    for (u32 i = 0; i < count; ++i) {
+        head += fmt::format("{:#010x} ", dw[i]);
+    }
+    LOG_WARNING(Render_Vulkan,
+                "Shader {:#018x} buffer {} at {:#x} ({} bytes) starts with a PM4 packet: {}",
+                stage.pgm_hash, index, base, size, head);
+}
+
 static void LogLightingConstants(const Shader::Info& stage, u32 index, VAddr base, u64 size,
                                  Core::MemoryManager* memory) {
     if (index != 0 || stage.pgm_hash != LightingShaderHash() || size < 25 * sizeof(u32)) {
@@ -885,6 +926,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
             LogLightingConstants(stage, i, vsharp.base_address, size, memory);
+            LogSuspiciousBufferContents(stage, i, vsharp.base_address, size, memory);
             if (auto barrier =
                     vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
                                                           : vk::AccessFlagBits2::eShaderRead,
