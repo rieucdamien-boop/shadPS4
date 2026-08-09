@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -174,16 +175,40 @@ void Swapchain::FindPresentFormat() {
         return;
     }
 
+    // Experiment switch: SHADPS4_SRGB_PRESENT=1 asks for an sRGB swapchain instead of a UNORM one.
+    // A UNORM swapchain hands the image to the display exactly as written, with no encoding step.
+    // If the final frame is still linear at that point, the midtones collapse, the blacks lift and
+    // the balance drifts warm - over the whole image, in every scene. An sRGB swapchain makes the
+    // hardware apply the encode on write instead. Whether that is correct depends on what the
+    // guest already did to the frame, which is exactly what this switch is meant to find out.
+    static const bool want_srgb = std::getenv("SHADPS4_SRGB_PRESENT") != nullptr;
+
     // Try to find a suitable format.
     for (const vk::SurfaceFormatKHR& sformat : formats) {
         vk::Format format = sformat.format;
-        if (format != vk::Format::eR8G8B8A8Unorm && format != vk::Format::eB8G8R8A8Unorm) {
+        const bool is_unorm =
+            format == vk::Format::eR8G8B8A8Unorm || format == vk::Format::eB8G8R8A8Unorm;
+        const bool is_srgb =
+            format == vk::Format::eR8G8B8A8Srgb || format == vk::Format::eB8G8R8A8Srgb;
+        if (want_srgb ? !is_srgb : !is_unorm) {
             continue;
         }
 
         surface_format.format = format;
         surface_format.colorSpace = sformat.colorSpace;
+        LOG_INFO(Render_Vulkan, "Presenting with {}", vk::to_string(format));
         return;
+    }
+
+    if (want_srgb) {
+        LOG_WARNING(Render_Vulkan, "No sRGB swapchain format offered, falling back to UNORM");
+        for (const vk::SurfaceFormatKHR& sformat : formats) {
+            if (sformat.format == vk::Format::eR8G8B8A8Unorm ||
+                sformat.format == vk::Format::eB8G8R8A8Unorm) {
+                surface_format = sformat;
+                return;
+            }
+        }
     }
 
     UNREACHABLE_MSG("Unable to find required swapchain format!");
