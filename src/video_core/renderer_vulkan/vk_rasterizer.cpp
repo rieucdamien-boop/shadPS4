@@ -1468,8 +1468,11 @@ void Rasterizer::UpdateDepthStencilState() const {
             (front ? regs.poly_offset.front_scale : regs.poly_offset.back_scale) / 16.f);
     }
 
-    const auto stencil_test_enabled =
-        regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid();
+    // Experiment switch: SHADPS4_NO_STENCIL=1 drops the stencil test entirely. If a scene that
+    // renders black lights up with this set, the stencil content is what rejects the lighting.
+    static const bool ignore_stencil = std::getenv("SHADPS4_NO_STENCIL") != nullptr;
+    const auto stencil_test_enabled = !ignore_stencil && regs.depth_control.stencil_enable &&
+                                      regs.depth_buffer.StencilValid();
     dynamic_state.SetStencilTestEnabled(stencil_test_enabled);
     if (stencil_test_enabled) {
         const StencilOps front_ops{
