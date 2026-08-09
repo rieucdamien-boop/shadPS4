@@ -768,31 +768,33 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     return true;
 }
 
-// The deferred lighting fragment shader ends with a smoothstep fade whose only free
-// parameter is dword 24 of its flattened user data:
+// The deferred lighting fragment shader finishes with a smoothstep fade whose only free
+// parameter is dword 24 of its first constant buffer:
 //     t = saturate((k + d) / (k + 1));  attenuation = 3t^2 - 2t^3
 // A small k collapses that attenuation, which would leave lights that are computed and
-// visible in their own halo but contribute almost nothing to the surfaces around them.
-// Dwords 16-23 are the values the shader's SRT program fetches from guest memory, printed
-// alongside so a wrong k can be told apart from a wrong fetch.
+// visible in their own halo while contributing almost nothing to nearby surfaces.
 //
-// SHADPS4_LIGHT_SHADER overrides the hash, in case another title or another pass wants
-// the same trace without a rebuild.
+// That buffer lives in guest memory, not in the flattened user data, so the value has to be
+// read through the guest pointer. SHADPS4_LIGHT_SHADER overrides the hash.
 static u64 LightingShaderHash() {
-    static const u64 hash = [] {
+    static const u64 hash = []() -> u64 {
         if (const char* env = std::getenv("SHADPS4_LIGHT_SHADER")) {
-            return std::strtoull(env, nullptr, 16);
+            return static_cast<u64>(std::strtoull(env, nullptr, 16));
         }
-        return u64{0x3e3b245fdc695364};
+        return 0x3e3b245fdc695364ULL;
     }();
     return hash;
 }
 
-static void LogLightingConstants(const Shader::Info& stage) {
-    if (stage.pgm_hash != LightingShaderHash() || stage.flattened_ud_buf.size() <= 24) {
+static void LogLightingConstants(const Shader::Info& stage, u32 index, VAddr base, u64 size,
+                                 Core::MemoryManager* memory) {
+    if (index != 0 || stage.pgm_hash != LightingShaderHash() || size < 25 * sizeof(u32)) {
         return;
     }
-    const auto& ud = stage.flattened_ud_buf;
+    if (!memory->IsValidGpuMapping(base, 25 * sizeof(u32))) {
+        return;
+    }
+    const auto* ud = reinterpret_cast<const u32*>(base);
     // Only print when the reading changes, so walking between two areas leaves a short trace
     // instead of one line per frame.
     static u32 last_reported = ~0U;
@@ -800,14 +802,33 @@ static void LogLightingConstants(const Shader::Info& stage) {
         return;
     }
     last_reported = ud[24];
-    const auto f = [&ud](size_t i) { return std::bit_cast<float>(ud[i]); };
-    LOG_INFO(Render_Vulkan,
-             "lighting k = {} (raw {:#010x}), fetched dwords 16-23: {} {} {} {} {} {} {} {}", f(24),
-             ud[24], f(16), f(17), f(18), f(19), f(20), f(21), f(22), f(23));
+    const auto f = [ud](size_t i) { return std::bit_cast<float>(ud[i]); };
+    LOG_INFO(Render_Vulkan, "lighting k = {} (raw {:#010x}), dwords 16-23: {} {} {} {} {} {} {} {}",
+             f(24), ud[24], f(16), f(17), f(18), f(19), f(20), f(21), f(22), f(23));
+}
+
+// Insurance against having picked the wrong shader: name every fragment shader that runs, once
+// each. If the hash above never appears here, it is not the one drawing this scene.
+static void LogFragmentShaderOnce(const Shader::Info& stage) {
+    if (stage.stage != Shader::Stage::Fragment) {
+        return;
+    }
+    static std::mutex seen_mutex;
+    static std::set<u64> seen;
+    bool is_new = false;
+    {
+        std::scoped_lock lk{seen_mutex};
+        is_new = seen.insert(stage.pgm_hash).second;
+    }
+    if (is_new) {
+        LOG_INFO(Render_Vulkan, "Fragment shader {:#018x} uses {} buffers", stage.pgm_hash,
+                 stage.buffers.size());
+    }
 }
 
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
+    LogFragmentShaderOnce(stage);
     buffer_bindings.clear();
 
     for (const auto& desc : stage.buffers) {
@@ -839,7 +860,6 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 const u64 offset =
                     vk_buffer.Copy(stage.flattened_ud_buf.data(), ubo_size, alignment);
                 buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
-                LogLightingConstants(stage);
             } else if (desc.buffer_type == Shader::BufferType::BdaPagetable) {
                 const auto* bda_buffer = buffer_cache.GetBdaPageTableBuffer();
                 buffer_infos.emplace_back(bda_buffer->Handle(), 0, bda_buffer->SizeBytes());
@@ -864,6 +884,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             ASSERT(adjust % 4 == 0);
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
+            LogLightingConstants(stage, i, vsharp.base_address, size, memory);
             if (auto barrier =
                     vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
                                                           : vk::AccessFlagBits2::eShaderRead,
