@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bit>
 #include <cstdlib>
 #include <mutex>
 #include <set>
@@ -495,8 +496,8 @@ void Rasterizer::DispatchDirect() {
     {
         static std::mutex shape_mutex;
         static std::set<u64> seen_shapes;
-        const u64 shape = (u64(cs_program.dim_x) << 42) | (u64(cs_program.dim_y) << 21) |
-                          u64(cs_program.dim_z);
+        const u64 shape =
+            (u64(cs_program.dim_x) << 42) | (u64(cs_program.dim_y) << 21) | u64(cs_program.dim_z);
         bool is_new = false;
         {
             std::scoped_lock lk{shape_mutex};
@@ -767,6 +768,44 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     return true;
 }
 
+// The deferred lighting fragment shader ends with a smoothstep fade whose only free
+// parameter is dword 24 of its flattened user data:
+//     t = saturate((k + d) / (k + 1));  attenuation = 3t^2 - 2t^3
+// A small k collapses that attenuation, which would leave lights that are computed and
+// visible in their own halo but contribute almost nothing to the surfaces around them.
+// Dwords 16-23 are the values the shader's SRT program fetches from guest memory, printed
+// alongside so a wrong k can be told apart from a wrong fetch.
+//
+// SHADPS4_LIGHT_SHADER overrides the hash, in case another title or another pass wants
+// the same trace without a rebuild.
+static u64 LightingShaderHash() {
+    static const u64 hash = [] {
+        if (const char* env = std::getenv("SHADPS4_LIGHT_SHADER")) {
+            return std::strtoull(env, nullptr, 16);
+        }
+        return u64{0x3e3b245fdc695364};
+    }();
+    return hash;
+}
+
+static void LogLightingConstants(const Shader::Info& stage) {
+    if (stage.pgm_hash != LightingShaderHash() || stage.flattened_ud_buf.size() <= 24) {
+        return;
+    }
+    const auto& ud = stage.flattened_ud_buf;
+    // Only print when the reading changes, so walking between two areas leaves a short trace
+    // instead of one line per frame.
+    static u32 last_reported = ~0U;
+    if (ud[24] == last_reported) {
+        return;
+    }
+    last_reported = ud[24];
+    const auto f = [&ud](size_t i) { return std::bit_cast<float>(ud[i]); };
+    LOG_INFO(Render_Vulkan,
+             "lighting k = {} (raw {:#010x}), fetched dwords 16-23: {} {} {} {} {} {} {} {}", f(24),
+             ud[24], f(16), f(17), f(18), f(19), f(20), f(21), f(22), f(23));
+}
+
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     buffer_bindings.clear();
@@ -800,6 +839,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 const u64 offset =
                     vk_buffer.Copy(stage.flattened_ud_buf.data(), ubo_size, alignment);
                 buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
+                LogLightingConstants(stage);
             } else if (desc.buffer_type == Shader::BufferType::BdaPagetable) {
                 const auto* bda_buffer = buffer_cache.GetBdaPageTableBuffer();
                 buffer_infos.emplace_back(bda_buffer->Handle(), 0, bda_buffer->SizeBytes());
@@ -1471,8 +1511,8 @@ void Rasterizer::UpdateDepthStencilState() const {
     // Experiment switch: SHADPS4_NO_STENCIL=1 drops the stencil test entirely. If a scene that
     // renders black lights up with this set, the stencil content is what rejects the lighting.
     static const bool ignore_stencil = std::getenv("SHADPS4_NO_STENCIL") != nullptr;
-    const auto stencil_test_enabled = !ignore_stencil && regs.depth_control.stencil_enable &&
-                                      regs.depth_buffer.StencilValid();
+    const auto stencil_test_enabled =
+        !ignore_stencil && regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid();
     dynamic_state.SetStencilTestEnabled(stencil_test_enabled);
     if (stencil_test_enabled) {
         const StencilOps front_ops{
@@ -1515,9 +1555,8 @@ void Rasterizer::UpdateDepthStencilState() const {
                      "Stencil: write mask {:#x}, compare mask {:#x}, ref {}, func {}, clear {}, "
                      "pass op {}",
                      stencil_clear ? 0U : front.stencil_write_mask, front.stencil_mask,
-                     front.stencil_test_val,
-                     static_cast<u32>(regs.depth_control.stencil_ref_func), stencil_clear,
-                     static_cast<u32>(regs.stencil_control.stencil_zpass_front));
+                     front.stencil_test_val, static_cast<u32>(regs.depth_control.stencil_ref_func),
+                     stencil_clear, static_cast<u32>(regs.stencil_control.stencil_zpass_front));
         }
     }
 }
