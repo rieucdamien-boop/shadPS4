@@ -1491,12 +1491,8 @@ void Rasterizer::UpdateDepthStencilState() const {
         const auto back =
             regs.depth_control.backface_enable ? regs.stencil_ref_back : regs.stencil_ref_front;
         dynamic_state.SetStencilReferences(front.stencil_test_val, back.stencil_test_val);
-        // The render pass load op already applies the guest clear value, so this used to drop
-        // the write mask on a clearing pass to avoid writing twice. But the guest keeps drawing
-        // through that pass, and those draws are how the stencil gets its per-pixel values.
-        // Suppressing them leaves the buffer flat, and the deferred lighting - which only lights
-        // where stencil equals one - then rejects the whole scene.
-        dynamic_state.SetStencilWriteMasks(front.stencil_write_mask, back.stencil_write_mask);
+        dynamic_state.SetStencilWriteMasks(!stencil_clear ? front.stencil_write_mask : 0U,
+                                           !stencil_clear ? back.stencil_write_mask : 0U);
         dynamic_state.SetStencilCompareMasks(front.stencil_mask, back.stencil_mask);
 
         // Does anything ever write the stencil buffer? The deferred lighting passes only light
