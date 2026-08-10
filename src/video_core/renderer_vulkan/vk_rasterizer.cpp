@@ -3,6 +3,7 @@
 
 #include <bit>
 #include <cstdlib>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -808,14 +809,20 @@ static void LogSuspiciousBufferContents(const Shader::Info& stage,
     if (!is_set_context_reg) {
         return;
     }
+    // Reporting once per shader could not tell a fault that happens on every draw from one that
+    // only happens the first time a shader is seen - and those two have entirely different causes.
+    // Count the occurrences instead, and print the first three plus every thousandth, so the shape
+    // over time is visible without flooding the log.
     static std::mutex seen_mutex;
-    static std::set<u64> seen;
+    static std::map<u64, u64> counts;
     const u64 key = stage.pgm_hash ^ (u64{index} << 56);
+    u64 seen_count = 0;
     {
         std::scoped_lock lk{seen_mutex};
-        if (!seen.insert(key).second) {
-            return;
-        }
+        seen_count = ++counts[key];
+    }
+    if (seen_count > 3 && seen_count % 1000 != 0) {
+        return;
     }
     const auto* dw = reinterpret_cast<const u32*>(base);
     const u32 count = static_cast<u32>(std::min<u64>(size / sizeof(u32), 4));
@@ -827,17 +834,19 @@ static void LogSuspiciousBufferContents(const Shader::Info& stage,
     // shader code and fixed up by adding pgm_base; everything else is a descriptor read straight
     // out of the user data. Printing both halves of that sum says which of the two is wrong.
     if (desc.inline_cbuf) {
-        LOG_WARNING(Render_Vulkan,
-                    "Shader {:#018x} buffer {} at {:#x} ({} bytes) starts with a PM4 packet: {}| "
-                    "inline cbuf, raw base {:#x} + pgm_base {:#x}, {} records of {} bytes",
-                    stage.pgm_hash, index, base, size, head, u64(desc.inline_cbuf.base_address),
-                    stage.pgm_base, u32(desc.inline_cbuf.num_records),
-                    u64(desc.inline_cbuf.stride));
+        LOG_WARNING(
+            Render_Vulkan,
+            "Shader {:#018x} buffer {} at {:#x} ({} bytes), occurrence {}, starts with a PM4 "
+            "packet: {}| inline cbuf, raw base {:#x} + pgm_base {:#x}, {} records of {} "
+            "bytes",
+            stage.pgm_hash, index, base, size, seen_count, head, u64(desc.inline_cbuf.base_address),
+            stage.pgm_base, u32(desc.inline_cbuf.num_records), u64(desc.inline_cbuf.stride));
     } else {
-        LOG_WARNING(Render_Vulkan,
-                    "Shader {:#018x} buffer {} at {:#x} ({} bytes) starts with a PM4 packet: {}| "
-                    "user data sharp at dword {}",
-                    stage.pgm_hash, index, base, size, head, desc.sharp_idx);
+        LOG_WARNING(
+            Render_Vulkan,
+            "Shader {:#018x} buffer {} at {:#x} ({} bytes), occurrence {}, starts with a PM4 "
+            "packet: {}| user data sharp at dword {}",
+            stage.pgm_hash, index, base, size, seen_count, head, desc.sharp_idx);
     }
 }
 
