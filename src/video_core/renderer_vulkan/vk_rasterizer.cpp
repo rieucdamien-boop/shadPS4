@@ -1662,21 +1662,32 @@ void Rasterizer::UpdateDepthStencilState() const {
         // pixels where stencil equals one, so an empty stencil buffer means an unlit scene.
         static std::mutex stencil_mutex;
         static std::set<u64> seen_stencil;
-        const u64 key = (u64(front.stencil_write_mask) << 24) | (u64(front.stencil_mask) << 16) |
-                        (u64(front.stencil_test_val) << 8) |
-                        u64(regs.depth_control.stencil_ref_func);
+        // The clearing flag belongs in the key: a pass that intends to write the stencil and a
+        // pass that is silently prevented from doing so are the same state otherwise, and telling
+        // them apart is the whole point of this trace.
+        const u64 key =
+            (u64(stencil_clear) << 40) | (u64(regs.depth_control.stencil_enable) << 32) |
+            (u64(front.stencil_write_mask) << 24) | (u64(front.stencil_mask) << 16) |
+            (u64(front.stencil_test_val) << 8) | u64(regs.depth_control.stencil_ref_func);
         bool is_new = false;
         {
             std::scoped_lock lk{stencil_mutex};
             is_new = seen_stencil.insert(key).second;
         }
         if (is_new) {
+            // Print the mask the guest asked for next to the one actually used. A pass that wanted
+            // to write and was reduced to zero is a light volume that never gets marked, and every
+            // light gated on that mark is then rejected.
+            const u32 wanted = front.stencil_write_mask;
+            const u32 used = stencil_clear ? 0U : wanted;
             LOG_INFO(Render_Vulkan,
-                     "Stencil: write mask {:#x}, compare mask {:#x}, ref {}, func {}, clear {}, "
-                     "pass op {}",
-                     stencil_clear ? 0U : front.stencil_write_mask, front.stencil_mask,
-                     front.stencil_test_val, static_cast<u32>(regs.depth_control.stencil_ref_func),
-                     stencil_clear, static_cast<u32>(regs.stencil_control.stencil_zpass_front));
+                     "Stencil: write mask asked {:#x} used {:#x}{}, compare mask {:#x}, ref {}, "
+                     "func {}, test {}, clear {}, pass op {}",
+                     wanted, used, (wanted != 0 && used == 0) ? " <- SUPPRESSED" : "",
+                     front.stencil_mask, front.stencil_test_val,
+                     static_cast<u32>(regs.depth_control.stencil_ref_func),
+                     static_cast<u32>(regs.depth_control.stencil_enable), stencil_clear,
+                     static_cast<u32>(regs.stencil_control.stencil_zpass_front));
         }
     }
 }
