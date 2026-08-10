@@ -3,6 +3,7 @@
 
 #include <ranges>
 
+#include <cstdlib>
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
@@ -297,7 +298,13 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_amd_shader_explicit_vertex_parameter =
             instance_.IsAmdShaderExplicitVertexParameterSupported(),
         .supports_fragment_shader_barycentric = instance_.IsFragmentShaderBarycentricSupported(),
-        .needs_manual_interpolation = instance.IsFragmentShaderBarycentricSupported() &&
+        // Experiment switch: SHADPS4_NO_MANUAL_INTERP=1 leaves interpolation to the hardware.
+        // The manual path reconstructs it from barycentrics and is taken only on the NVIDIA
+        // proprietary driver, so it is exercised by a minority of users. Battlefield 4's deferred
+        // lighting discards nearly every pixel on a test built from interpolated attributes, which
+        // makes this path a suspect worth being able to switch off without a rebuild.
+        .needs_manual_interpolation = std::getenv("SHADPS4_NO_MANUAL_INTERP") == nullptr &&
+                                      instance.IsFragmentShaderBarycentricSupported() &&
                                       instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .needs_lds_barriers = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ||
                               instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
