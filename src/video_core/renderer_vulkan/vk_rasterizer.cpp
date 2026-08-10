@@ -840,11 +840,11 @@ static void LogSuspiciousBufferContents(const Shader::Info& stage,
         const float m = f < 0 ? -f : f;
         return m > 1e-6f && m < 1e6f;
     };
-    constexpr i64 Sweep = 1024;
+    constexpr s64 Sweep = 1024;
     constexpr u32 RunLength = 8;
-    i64 found_at = Sweep + 1;
+    s64 found_at = Sweep + 1;
     if (memory->IsValidGpuMapping(base - Sweep, 2 * Sweep + RunLength * sizeof(u32))) {
-        for (i64 off = -Sweep; off <= Sweep; off += 4) {
+        for (s64 off = -Sweep; off <= Sweep; off += 4) {
             const auto* probe = reinterpret_cast<const u32*>(base + off);
             u32 run = 0;
             while (run < RunLength && looks_like_parameter(probe[run])) {
