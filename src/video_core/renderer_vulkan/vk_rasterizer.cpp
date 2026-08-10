@@ -797,8 +797,9 @@ static u64 LightingShaderHash() {
 // a whole session rather than a single frame. Once per shader and slot; a real parameter buffer
 // starting with that exact bit pattern would be a remarkable coincidence, but it is possible, so
 // this reports rather than acts.
-static void LogSuspiciousBufferContents(const Shader::Info& stage, u32 index, VAddr base, u64 size,
-                                        Core::MemoryManager* memory) {
+static void LogSuspiciousBufferContents(const Shader::Info& stage,
+                                        const Shader::BufferResource& desc, u32 index, VAddr base,
+                                        u64 size, Core::MemoryManager* memory) {
     if (size < sizeof(u32) || !memory->IsValidGpuMapping(base, sizeof(u32))) {
         return;
     }
@@ -822,9 +823,22 @@ static void LogSuspiciousBufferContents(const Shader::Info& stage, u32 index, VA
     for (u32 i = 0; i < count; ++i) {
         head += fmt::format("{:#010x} ", dw[i]);
     }
-    LOG_WARNING(Render_Vulkan,
-                "Shader {:#018x} buffer {} at {:#x} ({} bytes) starts with a PM4 packet: {}",
-                stage.pgm_hash, index, base, size, head);
+    // Where did the address come from? An inline constant buffer is treated as an offset from the
+    // shader code and fixed up by adding pgm_base; everything else is a descriptor read straight
+    // out of the user data. Printing both halves of that sum says which of the two is wrong.
+    if (desc.inline_cbuf) {
+        LOG_WARNING(Render_Vulkan,
+                    "Shader {:#018x} buffer {} at {:#x} ({} bytes) starts with a PM4 packet: {}| "
+                    "inline cbuf, raw base {:#x} + pgm_base {:#x}, {} records of {} bytes",
+                    stage.pgm_hash, index, base, size, head, u64(desc.inline_cbuf.base_address),
+                    stage.pgm_base, u32(desc.inline_cbuf.num_records),
+                    u64(desc.inline_cbuf.stride));
+    } else {
+        LOG_WARNING(Render_Vulkan,
+                    "Shader {:#018x} buffer {} at {:#x} ({} bytes) starts with a PM4 packet: {}| "
+                    "user data sharp at dword {}",
+                    stage.pgm_hash, index, base, size, head, desc.sharp_idx);
+    }
 }
 
 static void LogLightingConstants(const Shader::Info& stage, u32 index, VAddr base, u64 size,
@@ -926,7 +940,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
             LogLightingConstants(stage, i, vsharp.base_address, size, memory);
-            LogSuspiciousBufferContents(stage, i, vsharp.base_address, size, memory);
+            LogSuspiciousBufferContents(stage, desc, i, vsharp.base_address, size, memory);
             if (auto barrier =
                     vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
                                                           : vk::AccessFlagBits2::eShaderRead,
