@@ -824,6 +824,39 @@ static void LogSuspiciousBufferContents(const Shader::Info& stage,
     if (seen_count > 3 && seen_count % 1000 != 0) {
         return;
     }
+    // The address lands on a packet header, but the parameters the shader wants are somewhere
+    // nearby - a RenderDoc capture put them 128 bytes lower. Sweep a window around the address and
+    // report where a run of plausible parameter floats begins. A distance that comes out the same
+    // every time is the size of the mistake; one that varies means the address is simply unrelated
+    // to the data.
+    const auto looks_like_parameter = [](u32 raw) {
+        if (raw == 0) {
+            return true; // padding between fields is common and harmless
+        }
+        if ((raw >> 30) == 3 && (raw & 0xFFFF) == 0x6900) {
+            return false; // another packet header
+        }
+        const float f = std::bit_cast<float>(raw);
+        const float m = f < 0 ? -f : f;
+        return m > 1e-6f && m < 1e6f;
+    };
+    constexpr i64 Sweep = 1024;
+    constexpr u32 RunLength = 8;
+    i64 found_at = Sweep + 1;
+    if (memory->IsValidGpuMapping(base - Sweep, 2 * Sweep + RunLength * sizeof(u32))) {
+        for (i64 off = -Sweep; off <= Sweep; off += 4) {
+            const auto* probe = reinterpret_cast<const u32*>(base + off);
+            u32 run = 0;
+            while (run < RunLength && looks_like_parameter(probe[run])) {
+                ++run;
+            }
+            if (run == RunLength) {
+                found_at = off;
+                break;
+            }
+        }
+    }
+
     const auto* dw = reinterpret_cast<const u32*>(base);
     const u32 count = static_cast<u32>(std::min<u64>(size / sizeof(u32), 4));
     std::string head;
@@ -838,15 +871,16 @@ static void LogSuspiciousBufferContents(const Shader::Info& stage,
             Render_Vulkan,
             "Shader {:#018x} buffer {} at {:#x} ({} bytes), occurrence {}, starts with a PM4 "
             "packet: {}| inline cbuf, raw base {:#x} + pgm_base {:#x}, {} records of {} "
-            "bytes",
+            "bytes, parameters found at offset {}",
             stage.pgm_hash, index, base, size, seen_count, head, u64(desc.inline_cbuf.base_address),
-            stage.pgm_base, u32(desc.inline_cbuf.num_records), u64(desc.inline_cbuf.stride));
+            stage.pgm_base, u32(desc.inline_cbuf.num_records), u64(desc.inline_cbuf.stride),
+            found_at);
     } else {
         LOG_WARNING(
             Render_Vulkan,
             "Shader {:#018x} buffer {} at {:#x} ({} bytes), occurrence {}, starts with a PM4 "
-            "packet: {}| user data sharp at dword {}",
-            stage.pgm_hash, index, base, size, seen_count, head, desc.sharp_idx);
+            "packet: {}| user data sharp at dword {}, parameters found at offset {}",
+            stage.pgm_hash, index, base, size, seen_count, head, desc.sharp_idx, found_at);
     }
 }
 
