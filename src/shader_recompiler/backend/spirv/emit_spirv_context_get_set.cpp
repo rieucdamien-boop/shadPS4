@@ -10,6 +10,8 @@
 #include "shader_recompiler/runtime_info.h"
 
 #include <magic_enum/magic_enum.hpp>
+#include <cstdlib>
+#include <cstring>
 
 namespace Shader::Backend::SPIRV {
 
@@ -228,6 +230,7 @@ void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, u32 elemen
     if (IR::IsMrt(attr)) {
         const u32 index{u32(attr) - u32(IR::Attribute::RenderTarget0)};
         const auto& info{ctx.frag_outputs.at(index)};
+        static const u64 boost_hash = [] { const char* const e = std::getenv("SHADPS4_BOOST_HASH"); return e != nullptr ? std::strtoull(e, nullptr, 16) : 0ULL; }(); static const bool boost_half = [] { const char* const e = std::getenv("SHADPS4_BOOST_HASH"); return e != nullptr && std::strlen(e) <= 8; }(); static const float boost_factor = [] { const char* const e = std::getenv("SHADPS4_BOOST"); return e != nullptr ? static_cast<float>(std::atof(e)) : 1.0f; }(); const bool boost_match = boost_hash != 0 && (boost_half ? (ctx.info.pgm_hash >> 32) == boost_hash : ctx.info.pgm_hash == boost_hash); if (boost_match && element < 3 && !info.is_integer) { value = ctx.OpFMul(ctx.F32[1], value, ctx.ConstF32(boost_factor)); }
         if (info.num_components == 1) {
             return op_store(info.id);
         } else {
