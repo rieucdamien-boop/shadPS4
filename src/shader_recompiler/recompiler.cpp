@@ -8,6 +8,12 @@
 #include "shader_recompiler/ir/post_order.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
+#include <cstdlib>
+#include <cstring>
+#include "common/logging/log.h"
+#include "shader_recompiler/ir/attribute.h"
+#include "shader_recompiler/ir/basic_block.h"
+#include "shader_recompiler/ir/opcodes.h"
 
 namespace Shader {
 
@@ -91,6 +97,7 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::CollectShaderInfoPass(program, profile);
 
     Shader::IR::DumpProgram(program, info);
+    { static const u64 ph = [] { const char* const e = std::getenv("SHADPS4_PROBE_HASH"); return e != nullptr ? std::strtoull(e, nullptr, 16) : 0ULL; }(); static const bool phalf = [] { const char* const e = std::getenv("SHADPS4_PROBE_HASH"); return e != nullptr && std::strlen(e) <= 8; }(); static const size_t pidx = [] { const char* const e = std::getenv("SHADPS4_PROBE_INDEX"); return e != nullptr ? static_cast<size_t>(std::strtoull(e, nullptr, 10)) : static_cast<size_t>(0); }(); if (ph != 0 && pidx != 0 && (phalf ? (info.pgm_hash >> 32) == ph : info.pgm_hash == ph)) { size_t idx = program.blocks.size(); IR::Inst* found = nullptr; for (IR::Block* const b : program.blocks) { for (IR::Inst& i : *b) { if (idx + 3 > pidx && idx < pidx + 4) { LOG_INFO(Render_Recompiler, "sonde {:#x}: index {} = {}", info.pgm_hash, idx, i.GetOpcode()); } if (idx == pidx) { found = &i; } ++idx; } } if (found != nullptr && IR::TypeOf(found->GetOpcode()) == IR::Type::F32) { for (IR::Block* const b : program.blocks) { for (IR::Inst& i : *b) { if (i.GetOpcode() == IR::Opcode::SetAttribute && IR::IsMrt(i.Arg(0).Attribute())) { i.SetArg(1, IR::Value{found}); } } } LOG_INFO(Render_Recompiler, "sonde active: index {} branche sur la sortie", pidx); } else { LOG_INFO(Render_Recompiler, "sonde inactive: {}", found == nullptr ? "index introuvable" : "la valeur n'est pas de type F32"); } } }
 
     return program;
 }
