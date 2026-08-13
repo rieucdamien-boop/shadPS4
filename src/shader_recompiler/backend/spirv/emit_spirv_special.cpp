@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+
 #include "shader_recompiler/ir/debug_print.h"
 
 namespace Shader::Backend::SPIRV {
@@ -79,6 +81,16 @@ void EmitDiscard(EmitContext& ctx) {
 }
 
 void EmitDiscardCond(EmitContext& ctx, Id condition) {
+    // Experiment switch: SHADPS4_NO_DISCARD=1 drops conditional discards entirely.
+    // Battlefield 4's deferred lighting rejects nearly every pixel on a projected cone test, and
+    // outputs about 4e-05 where it does not. Blend, depth, stencil, scissor, geometry, constants
+    // and vertex outputs were all measured correct, so the rejection comes from the shader's own
+    // test. Letting every fragment through separates two questions that are currently tangled:
+    // whether the test is what hides the lights, and whether the intensity is independently wrong.
+    static const bool ignore_discard = std::getenv("SHADPS4_NO_DISCARD") != nullptr;
+    if (ignore_discard) {
+        return;
+    }
     const Id kill_label{ctx.OpLabel()};
     const Id merge_label{ctx.OpLabel()};
     ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
