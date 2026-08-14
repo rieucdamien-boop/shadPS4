@@ -435,7 +435,7 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
     const VAddr subject =
         occlusion_pending_addr != 0 ? occlusion_pending_addr : reinterpret_cast<VAddr>(results);
     const auto known = occlusion_history.find(subject);
-    u64 count = known != occlusion_history.end() ? known->second : OcclusionAssumeVisible;
+    static u64 occ_hits = 0; static u64 occ_misses = 0; const bool occ_hit = known != occlusion_history.end(); if (occ_hit) { ++occ_hits; } else { ++occ_misses; } if (((occ_hits + occ_misses) & 0x3FF) == 0) { LOG_INFO(Render_Vulkan, "occlusion: historique trouve {}, manque {}", occ_hits, occ_misses); } u64 count = occ_hit ? known->second : 0;
     if (occlusion_prev_valid) {
         u64 previous = 0;
         if (instance.GetDevice().getQueryPoolResults(
