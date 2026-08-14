@@ -435,14 +435,14 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
     const VAddr subject =
         occlusion_pending_addr != 0 ? occlusion_pending_addr : reinterpret_cast<VAddr>(results);
     const auto known = occlusion_history.find(subject);
-    static u64 occ_running = 0; (void)known; u64 count = 0;
+    static u64 occ_ouverte = 0; u64 count = known != occlusion_history.end() ? known->second : 0;
     if (occlusion_prev_valid) {
         u64 previous = 0;
         if (instance.GetDevice().getQueryPoolResults(
                 *occlusion_pool, occlusion_prev_slot, 1, sizeof(previous), &previous,
                 sizeof(previous), vk::QueryResultFlagBits::e64) == vk::Result::eSuccess) {
-            occ_running += previous; count = 0;
-            occlusion_history[subject] = previous;
+            if (occ_ouverte != 0) { occlusion_history[static_cast<VAddr>(occ_ouverte)] = previous; }
+            occ_ouverte = static_cast<u64>(reinterpret_cast<VAddr>(results));
             // Are we ever told something is hidden? If every answer is a big number the query
             // is not measuring what we think it is, and flares will always show through walls.
             static u32 sample_tick = 0;
