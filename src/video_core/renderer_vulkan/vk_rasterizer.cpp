@@ -1,3 +1,4 @@
+occ_total
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -435,13 +436,13 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
     const VAddr subject =
         occlusion_pending_addr != 0 ? occlusion_pending_addr : reinterpret_cast<VAddr>(results);
     const auto known = occlusion_history.find(subject);
-    static u64 occ_hits = 0; static u64 occ_misses = 0; static u64 occ_total = 0; const bool occ_hit = known != occlusion_history.end(); if (occ_hit) { ++occ_hits; } else { ++occ_misses; } if ((occ_total % 4096) < 32) { LOG_INFO(Render_Vulkan, "occ #{} sujet={:#x} ouvre={} lit={} valide={} connu={}", occ_total, static_cast<u64>(subject), occlusion_slot, occlusion_prev_slot, occlusion_prev_valid, occ_hit); } ++occ_total; u64 count = occ_hit ? known->second : 0;
+    static u64 occ_running = 0; (void)known; u64 count = occ_running;
     if (occlusion_prev_valid) {
         u64 previous = 0;
         if (instance.GetDevice().getQueryPoolResults(
                 *occlusion_pool, occlusion_prev_slot, 1, sizeof(previous), &previous,
                 sizeof(previous), vk::QueryResultFlagBits::e64) == vk::Result::eSuccess) {
-            count = previous;
+            occ_running += previous; count = occ_running;
             occlusion_history[subject] = previous;
             // Are we ever told something is hidden? If every answer is a big number the query
             // is not measuring what we think it is, and flares will always show through walls.
