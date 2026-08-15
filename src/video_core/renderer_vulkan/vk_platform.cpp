@@ -82,14 +82,14 @@ void ExplainDeviceAddress(u64 address) {
                 const u64 distance = end <= address          ? address - end
                                      : record.base > address ? record.base - address
                                                              : 0;
-                if (distance < 0x400000) {
+                if (distance < 0x40000) {
                     neighbours.emplace_back(distance, record);
                 }
             }
         }
         std::sort(neighbours.begin(), neighbours.end(),
                   [](const auto& a, const auto& b) { return a.first < b.first; });
-        for (size_t i = 0; i < neighbours.size() && i < 12; ++i) {
+        for (size_t i = 0; i < neighbours.size() && i < 48; ++i) {
             const AddressBindingRecord& record = neighbours[i].second;
             LOG_CRITICAL(Render_Vulkan,
                          "    neighbour {:#x} away: {} {} handle {:#x} [{:#018x}, {:#018x})",
