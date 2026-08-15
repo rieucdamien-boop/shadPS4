@@ -10,6 +10,7 @@
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/texture_cache/copy_bounds.h"
 
 namespace Vulkan {
 
@@ -203,6 +204,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         static std::once_flag reported;
         std::call_once(reported, [this] {
             instance.ReportDeviceFault();
+            VideoCore::DumpUploadRing();
             LOG_CRITICAL(Render_Vulkan, "Device lost during submit. Stopping.");
             Common::Log::Flush();
         });
