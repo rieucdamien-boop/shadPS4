@@ -459,7 +459,16 @@ bool Rasterizer::OcclusionQueryDump(u64* results, s32 num_pairs) {
     occlusion_prev_slot = occlusion_slot;
     occlusion_prev_valid = true;
     occlusion_slot = (occlusion_slot + 1) % NumOcclusionSlots;
-    results[0] = count | OcclusionValidMask;
+    // Le jeu compare ce compte a un seuil qu on ne connait pas. Les valeurs reelles relevees
+    // sont minuscules — 6, 64, 75 echantillons — et les flares restent eteints, alors que le
+    // compteur cumulatif les allumait tous. Le bon ordre de grandeur est entre les deux.
+    // SHADPS4_OCCLUSION_SCALE permet de le chercher sans reconstruire.
+    static const u64 occ_scale = [] {
+        const char* v = std::getenv("SHADPS4_OCCLUSION_SCALE");
+        return v != nullptr ? std::max<u64>(1, std::strtoull(v, nullptr, 10)) : 1;
+    }();
+    const u64 scaled = std::min<u64>(count * occ_scale, 0x00FFFFFFFFFFFFFFull);
+    results[0] = scaled | OcclusionValidMask;
     return true;
 }
 
