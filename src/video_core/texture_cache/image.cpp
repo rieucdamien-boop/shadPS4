@@ -211,6 +211,16 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                           info.size.height, info.size.depth, AmdGpu::NameOf(info.tile_mode),
                           vk::to_string(info.pixel_format), info.guest_address, info.guest_size,
                           info.resources.layers, info.resources.levels, info.num_samples);
+
+    // La meme image, mais nommee du cote invite : adresse, taille, pavage. C est ce qui
+    // permet de reconnaitre une surface recreee cent fois de suite.
+    VmaAllocationInfo pos{};
+    vmaGetAllocationInfo(instance->GetAllocator(), backing->image.allocation, &pos);
+    LOG_INFO(Render_Vulkan,
+             "image guest {:#x}:{:#x} tiled {} {}x{} {} -> memory {:#x} offset {:#x} ends {:#x}",
+             info.guest_address, info.guest_size, info.props.is_tiled, info.size.width,
+             info.size.height, vk::to_string(info.pixel_format),
+             reinterpret_cast<u64>(pos.deviceMemory), pos.offset, pos.offset + pos.size);
 }
 
 Image::~Image() = default;
@@ -403,6 +413,9 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
         CopyRegionFits("Upload", "dst", backing->image.image_ci, c.imageSubresource, c.imageOffset,
                        c.imageExtent);
     }
+    if (instance->IsDiagnosticCheckpointsSupported()) {
+        cmdbuf.setCheckpointNV(reinterpret_cast<const void*>(0xB1000001ull));
+    }
     cmdbuf.copyBufferToImage(buffer, GetImage(), vk::ImageLayout::eTransferDstOptimal,
                              upload_copies);
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
@@ -452,6 +465,9 @@ void Image::Download(std::span<const vk::BufferImageCopy> download_copies, vk::B
     for (const auto& c : download_copies) {
         CopyRegionFits("Download", "src", backing->image.image_ci, c.imageSubresource, c.imageOffset,
                        c.imageExtent);
+    }
+    if (instance->IsDiagnosticCheckpointsSupported()) {
+        cmdbuf.setCheckpointNV(reinterpret_cast<const void*>(0xB1000002ull));
     }
     cmdbuf.copyImageToBuffer(GetImage(), vk::ImageLayout::eTransferSrcOptimal, buffer,
                              download_copies);
@@ -618,6 +634,9 @@ void Image::CopyImage(Image& src_image) {
     auto cmdbuf = scheduler->CommandBuffer();
 
     if (!regions.empty()) {
+        if (instance->IsDiagnosticCheckpointsSupported()) {
+            cmdbuf.setCheckpointNV(reinterpret_cast<const void*>(0xB1000003ull));
+        }
         cmdbuf.copyImage(src_image.GetImage(), src_image.backing->state.layout, GetImage(),
                          backing->state.layout, regions);
     }
@@ -686,6 +705,9 @@ void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset)
         .pBufferMemoryBarriers = &pre_copy_barrier,
     });
 
+    if (instance->IsDiagnosticCheckpointsSupported()) {
+        cmdbuf.setCheckpointNV(reinterpret_cast<const void*>(0xB1000004ull));
+    }
     cmdbuf.copyImageToBuffer(src_image.GetImage(), vk::ImageLayout::eTransferSrcOptimal, buffer,
                              buffer_copies);
 
@@ -752,6 +774,9 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
                    image_copy.srcOffset, image_copy.extent);
     CopyRegionFits("CopyMip", "dst", backing->image.image_ci, image_copy.dstSubresource,
                    image_copy.dstOffset, image_copy.extent);
+    if (instance->IsDiagnosticCheckpointsSupported()) {
+        cmdbuf.setCheckpointNV(reinterpret_cast<const void*>(0xB1000005ull));
+    }
     cmdbuf.copyImage(src_image.GetImage(), src_image.backing->state.layout, GetImage(),
                      backing->state.layout, image_copy);
     Transit(vk::ImageLayout::eGeneral,
@@ -790,6 +815,9 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
                        region.srcSubresource, region.srcOffset, region.extent);
         CopyRegionFits("Resolve", "dst", backing->image.image_ci, region.dstSubresource,
                        region.dstOffset, region.extent);
+        if (instance->IsDiagnosticCheckpointsSupported()) {
+            scheduler->CommandBuffer().setCheckpointNV(reinterpret_cast<const void*>(0xB1000006ull));
+        }
         scheduler->CommandBuffer().copyImage(src_image.GetImage(),
                                              vk::ImageLayout::eTransferSrcOptimal, GetImage(),
                                              vk::ImageLayout::eTransferDstOptimal, region);
@@ -815,6 +843,9 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
                        region.srcSubresource, region.srcOffset, region.extent);
         CopyRegionFits("ResolveMs", "dst", backing->image.image_ci, region.dstSubresource,
                        region.dstOffset, region.extent);
+        if (instance->IsDiagnosticCheckpointsSupported()) {
+            scheduler->CommandBuffer().setCheckpointNV(reinterpret_cast<const void*>(0xB1000008ull));
+        }
         scheduler->CommandBuffer().resolveImage(src_image.GetImage(),
                                                 vk::ImageLayout::eTransferSrcOptimal, GetImage(),
                                                 vk::ImageLayout::eTransferDstOptimal, region);
@@ -843,6 +874,9 @@ void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::Subresourc
                   "for levels {}+{} layers {}+{}",
                   clear_ci.mipLevels, clear_ci.arrayLayers, range.base.level, range.extent.levels,
                   range.base.layer, range.extent.layers);
+    }
+    if (instance->IsDiagnosticCheckpointsSupported()) {
+        cmdbuf.setCheckpointNV(reinterpret_cast<const void*>(0xB1000007ull));
     }
     cmdbuf.clearColorImage(GetImage(), vk::ImageLayout::eTransferDstOptimal, clear_value.color,
                            vk_range);
