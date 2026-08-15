@@ -85,7 +85,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
                     download_size);
         return;
     }
-    download_buffer.Commit();
+    static u32 dbg_rb = 0; if (dbg_rb < 40) { ++dbg_rb; LOG_WARNING(Render_Vulkan, "readback #{} pitch={} w={} h={} d={} layers={} bits={} size={:#x} offset={:#x}", dbg_rb, image.info.pitch, image.info.size.width, image.info.size.height, image.info.size.depth, image.info.resources.layers, image.info.num_bits, download_size, offset); } download_buffer.Commit();
     const vk::BufferImageCopy image_download = {
         .bufferOffset = offset,
         .bufferRowLength = image.info.pitch,
