@@ -4,6 +4,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 
 #include "common/logging/log.h"
 #include "common/types.h"
@@ -60,4 +62,80 @@ inline bool CopyRegionFits(const char* who, const char* side, const vk::ImageCre
     return false;
 }
 
+
+// --- Journal circulaire des televersements -----------------------------------------------
+//
+// Ecrire une ligne de journal par region coute si cher que le crash disparait : le
+// ralentissement referme la fenetre de course. On garde donc les derniers televersements
+// en memoire, en nombres bruts, sans formatage ni disque, et on ne les imprime qu au
+// moment de la faute.
+
+struct UploadNote {
+    u64 seq;
+    u64 mem;
+    u64 mem_off;
+    u64 mem_end;
+    u64 buf_off;
+    u32 img_w, img_h, img_d, layers, levels;
+    u32 mip, base_layer, layer_count;
+    s32 off_x, off_y, off_z;
+    u32 ext_w, ext_h, ext_d;
+    u32 row_len, img_height;
+};
+
+inline constexpr size_t NumUploadNotes = 64;
+inline std::array<UploadNote, NumUploadNotes> g_upload_notes{};
+inline std::atomic<u64> g_upload_seq{0};
+
+inline void NoteUpload(const vk::ImageCreateInfo& ci, const vk::BufferImageCopy& c, u64 mem,
+                       u64 mem_off, u64 mem_size) {
+    const u64 seq = g_upload_seq.fetch_add(1) + 1;
+    UploadNote& n = g_upload_notes[(seq - 1) % NumUploadNotes];
+    n.seq = seq;
+    n.mem = mem;
+    n.mem_off = mem_off;
+    n.mem_end = mem_off + mem_size;
+    n.buf_off = static_cast<u64>(c.bufferOffset);
+    n.img_w = ci.extent.width;
+    n.img_h = ci.extent.height;
+    n.img_d = ci.extent.depth;
+    n.layers = ci.arrayLayers;
+    n.levels = ci.mipLevels;
+    n.mip = c.imageSubresource.mipLevel;
+    n.base_layer = c.imageSubresource.baseArrayLayer;
+    n.layer_count = c.imageSubresource.layerCount;
+    n.off_x = c.imageOffset.x;
+    n.off_y = c.imageOffset.y;
+    n.off_z = c.imageOffset.z;
+    n.ext_w = c.imageExtent.width;
+    n.ext_h = c.imageExtent.height;
+    n.ext_d = c.imageExtent.depth;
+    n.row_len = c.bufferRowLength;
+    n.img_height = c.bufferImageHeight;
+}
+
+/// Imprime les derniers televersements enregistres. Appele depuis le rapport de faute.
+inline void DumpUploadRing() {
+    const u64 total = g_upload_seq.load();
+    if (total == 0) {
+        LOG_CRITICAL(Render_Vulkan, "    aucun televersement enregistre");
+        return;
+    }
+    const u64 first = total > NumUploadNotes ? total - NumUploadNotes + 1 : 1;
+    LOG_CRITICAL(Render_Vulkan, "    derniers televersements ({} au total, le plus recent en bas)",
+                 total);
+    for (u64 s = first; s <= total; ++s) {
+        const UploadNote& n = g_upload_notes[(s - 1) % NumUploadNotes];
+        if (n.seq != s) {
+            continue;
+        }
+        LOG_CRITICAL(Render_Vulkan,
+                     "      #{} img {}x{}x{} L:{} M:{} | memoire {:#x} [{:#x}, {:#x}) | mip {} "
+                     "couches {}+{} offset {},{},{} etendue {}x{}x{} | tampon {:#x} rowlen {} "
+                     "imgh {}",
+                     n.seq, n.img_w, n.img_h, n.img_d, n.layers, n.levels, n.mem, n.mem_off,
+                     n.mem_end, n.mip, n.base_layer, n.layer_count, n.off_x, n.off_y, n.off_z,
+                     n.ext_w, n.ext_h, n.ext_d, n.buf_off, n.row_len, n.img_height);
+    }
+}
 } // namespace VideoCore
