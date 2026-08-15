@@ -218,8 +218,8 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
     vmaGetAllocationInfo(instance->GetAllocator(), backing->image.allocation, &pos);
     LOG_INFO(Render_Vulkan,
              "image guest {:#x}:{:#x} tiled {} {}x{} {} -> memory {:#x} offset {:#x} ends {:#x}",
-             info.guest_address, info.guest_size, info.props.is_tiled, info.size.width,
-             info.size.height, vk::to_string(info.pixel_format),
+             info.guest_address, info.guest_size, static_cast<bool>(info.props.is_tiled),
+             info.size.width, info.size.height, vk::to_string(info.pixel_format),
              reinterpret_cast<u64>(pos.deviceMemory), pos.offset, pos.offset + pos.size);
 }
 
