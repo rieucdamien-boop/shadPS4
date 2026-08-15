@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <ranges>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -15,6 +16,10 @@
 namespace VideoCore {
 
 using namespace Vulkan;
+
+// Les traces memoire coutent tres cher : 200 000 lignes et 57 Mo de journal pour quelques
+// minutes de jeu, de quoi rendre le jeu injouable. Elles ne s allument que sur demande.
+static const bool trace_mem = std::getenv("SHADPS4_TRACE_MEM") != nullptr;
 
 Common::IncrementalIdProvider<u64> Image::global_image_uid{};
 
@@ -121,7 +126,8 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     // Dans quel bloc memoire cette image a-t-elle atterri, et ou dedans ? Quand le GPU faute
     // sur une adresse juste apres la fin d un bloc, cette ligne dit quelle image occupait
     // cette fin.
-    VmaAllocationInfo where{};
+    if (trace_mem) {
+        VmaAllocationInfo where{};
     vmaGetAllocationInfo(allocator, allocation, &where);
     LOG_INFO(Render_Vulkan,
              "image alloc {}x{}x{} {} L:{} M:{} -> memory {:#x} offset {:#x} size {:#x} ends {:#x}",
@@ -129,6 +135,7 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
              vk::to_string(image_ci.format), image_ci.arrayLayers, image_ci.mipLevels,
              reinterpret_cast<u64>(where.deviceMemory), where.offset, where.size,
              where.offset + where.size);
+    }
 }
 
 Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
@@ -214,13 +221,15 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
 
     // La meme image, mais nommee du cote invite : adresse, taille, pavage. C est ce qui
     // permet de reconnaitre une surface recreee cent fois de suite.
-    VmaAllocationInfo pos{};
+    if (trace_mem) {
+        VmaAllocationInfo pos{};
     vmaGetAllocationInfo(instance->GetAllocator(), backing->image.allocation, &pos);
     LOG_INFO(Render_Vulkan,
              "image guest {:#x}:{:#x} tiled {} {}x{} {} -> memory {:#x} offset {:#x} ends {:#x}",
              info.guest_address, info.guest_size, static_cast<bool>(info.props.is_tiled),
              info.size.width, info.size.height, vk::to_string(info.pixel_format),
              reinterpret_cast<u64>(pos.deviceMemory), pos.offset, pos.offset + pos.size);
+    }
 }
 
 Image::~Image() = default;
@@ -418,7 +427,8 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
     const auto& up_ci = backing->image.image_ci;
     boost::container::small_vector<vk::BufferImageCopy, 8> safe_copies;
     for (const auto& c : upload_copies) {
-        LOG_INFO(Render_Vulkan,
+        if (trace_mem) {
+                LOG_INFO(Render_Vulkan,
                  "upload #{} img {}x{}x{} {} L:{} M:{} mem {:#x} off {:#x} end {:#x} | mip {} "
                  "layers {}+{} imgoff {},{},{} ext {}x{}x{} | bufoff {:#x} rowlen {} imgh {}",
                  up_n, up_ci.extent.width, up_ci.extent.height, up_ci.extent.depth,
@@ -428,6 +438,7 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
                  c.imageSubresource.layerCount, c.imageOffset.x, c.imageOffset.y, c.imageOffset.z,
                  c.imageExtent.width, c.imageExtent.height, c.imageExtent.depth,
                  static_cast<u64>(c.bufferOffset), c.bufferRowLength, c.bufferImageHeight);
+        }
         CopyRegionFits("Upload", "dst", backing->image.image_ci, c.imageSubresource, c.imageOffset,
                        c.imageExtent);
         // Vulkan exige bufferRowLength >= imageExtent.width et bufferImageHeight >=
