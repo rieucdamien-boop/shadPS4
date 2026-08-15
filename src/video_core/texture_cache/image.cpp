@@ -409,7 +409,24 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
         .imageMemoryBarrierCount = static_cast<u32>(image_barriers.size()),
         .pImageMemoryBarriers = image_barriers.data(),
     });
+    // Le jalon 0xB1000001 designe cet endroit : c est ici que le GPU est mort. On imprime
+    // donc tout ce qui part au pilote, region par region, et ou vit l image visee.
+    static u32 up_n = 0;
+    ++up_n;
+    VmaAllocationInfo dst{};
+    vmaGetAllocationInfo(instance->GetAllocator(), backing->image.allocation, &dst);
+    const auto& up_ci = backing->image.image_ci;
     for (const auto& c : upload_copies) {
+        LOG_INFO(Render_Vulkan,
+                 "upload #{} img {}x{}x{} {} L:{} M:{} mem {:#x} off {:#x} end {:#x} | mip {} "
+                 "layers {}+{} imgoff {},{},{} ext {}x{}x{} | bufoff {:#x} rowlen {} imgh {}",
+                 up_n, up_ci.extent.width, up_ci.extent.height, up_ci.extent.depth,
+                 vk::to_string(up_ci.format), up_ci.arrayLayers, up_ci.mipLevels,
+                 reinterpret_cast<u64>(dst.deviceMemory), dst.offset, dst.offset + dst.size,
+                 c.imageSubresource.mipLevel, c.imageSubresource.baseArrayLayer,
+                 c.imageSubresource.layerCount, c.imageOffset.x, c.imageOffset.y, c.imageOffset.z,
+                 c.imageExtent.width, c.imageExtent.height, c.imageExtent.depth,
+                 static_cast<u64>(c.bufferOffset), c.bufferRowLength, c.bufferImageHeight);
         CopyRegionFits("Upload", "dst", backing->image.image_ci, c.imageSubresource, c.imageOffset,
                        c.imageExtent);
     }
