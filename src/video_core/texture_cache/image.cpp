@@ -427,6 +427,7 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
     const auto& up_ci = backing->image.image_ci;
     boost::container::small_vector<vk::BufferImageCopy, 8> safe_copies;
     for (const auto& c : upload_copies) {
+        NoteUpload(up_ci, c, reinterpret_cast<u64>(dst.deviceMemory), dst.offset, dst.size);
         if (trace_mem) {
                 LOG_INFO(Render_Vulkan,
                  "upload #{} img {}x{}x{} {} L:{} M:{} mem {:#x} off {:#x} end {:#x} | mip {} "
