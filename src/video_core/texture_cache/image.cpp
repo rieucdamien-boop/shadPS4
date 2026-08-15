@@ -416,6 +416,7 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
     VmaAllocationInfo dst{};
     vmaGetAllocationInfo(instance->GetAllocator(), backing->image.allocation, &dst);
     const auto& up_ci = backing->image.image_ci;
+    boost::container::small_vector<vk::BufferImageCopy, 8> safe_copies;
     for (const auto& c : upload_copies) {
         LOG_INFO(Render_Vulkan,
                  "upload #{} img {}x{}x{} {} L:{} M:{} mem {:#x} off {:#x} end {:#x} | mip {} "
@@ -429,12 +430,30 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
                  static_cast<u64>(c.bufferOffset), c.bufferRowLength, c.bufferImageHeight);
         CopyRegionFits("Upload", "dst", backing->image.image_ci, c.imageSubresource, c.imageOffset,
                        c.imageExtent);
+        // Vulkan exige bufferRowLength >= imageExtent.width et bufferImageHeight >=
+        // imageExtent.height. En dessous, le pilote calcule des adresses qui ne veulent plus
+        // rien dire et ecrit hors de l image. On refuse la region plutot que de tuer le device.
+        if (c.bufferRowLength != 0 && c.bufferRowLength < c.imageExtent.width) {
+            LOG_ERROR(Render_Vulkan,
+                      "Upload: bufferRowLength {} plus etroit que l etendue {}, region refusee",
+                      c.bufferRowLength, c.imageExtent.width);
+            continue;
+        }
+        if (c.bufferImageHeight != 0 && c.bufferImageHeight < c.imageExtent.height) {
+            LOG_ERROR(Render_Vulkan,
+                      "Upload: bufferImageHeight {} plus court que l etendue {}, region refusee",
+                      c.bufferImageHeight, c.imageExtent.height);
+            continue;
+        }
+        safe_copies.push_back(c);
     }
     if (instance->IsDiagnosticCheckpointsSupported()) {
         cmdbuf.setCheckpointNV(reinterpret_cast<const void*>(0xB1000001ull));
     }
-    cmdbuf.copyBufferToImage(buffer, GetImage(), vk::ImageLayout::eTransferDstOptimal,
-                             upload_copies);
+    if (!safe_copies.empty()) {
+        cmdbuf.copyBufferToImage(buffer, GetImage(), vk::ImageLayout::eTransferDstOptimal,
+                                 safe_copies);
+    }
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .dependencyFlags = vk::DependencyFlagBits::eByRegion,
         .bufferMemoryBarrierCount = 1,
