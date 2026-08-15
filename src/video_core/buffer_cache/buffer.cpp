@@ -3,6 +3,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -114,6 +115,16 @@ Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
 
     const auto device = instance->GetDevice();
     Vulkan::SetObjectName(device, Handle(), "Buffer {:#x}:{:#x}", cpu_addr, size_bytes);
+
+    // Quel bloc memoire ce tampon occupe-t-il ? Le rapport de faute donne le handle du
+    // VkDeviceMemory ; sans cette ligne on ne peut pas dire si un bloc appartient a un
+    // tampon ou a des images.
+    VmaAllocationInfo where{};
+    vmaGetAllocationInfo(instance->GetAllocator(), buffer.allocation, &where);
+    LOG_INFO(Render_Vulkan,
+             "buffer alloc {} {:#x} bytes -> memory {:#x} offset {:#x} size {:#x} ends {:#x}",
+             BufferTypeName(usage), size_bytes, reinterpret_cast<u64>(where.deviceMemory),
+             where.offset, where.size, where.offset + where.size);
 
     // Map it if it is host visible.
     VkMemoryPropertyFlags property_flags{};
