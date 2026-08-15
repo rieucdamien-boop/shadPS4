@@ -189,7 +189,7 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
         // Modify copies to have the staging offset in mind
         copy.dstOffset += offset;
     }
-    download_buffer.Commit();
+    static u32 dbg_bb = 0; if (dbg_bb < 40) { ++dbg_bb; LOG_WARNING(Render_Vulkan, "readback buffer #{} copies={} total={:#x} offset={:#x}", dbg_bb, copies.size(), total_size_bytes, offset); } download_buffer.Commit();
     scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.copyBuffer(buffer.buffer, download_buffer.Handle(), copies);
