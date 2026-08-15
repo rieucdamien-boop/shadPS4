@@ -117,6 +117,18 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
     image = vk::Image{unsafe_image};
+
+    // Dans quel bloc memoire cette image a-t-elle atterri, et ou dedans ? Quand le GPU faute
+    // sur une adresse juste apres la fin d un bloc, cette ligne dit quelle image occupait
+    // cette fin.
+    VmaAllocationInfo where{};
+    vmaGetAllocationInfo(allocator, allocation, &where);
+    LOG_INFO(Render_Vulkan,
+             "image alloc {}x{}x{} {} L:{} M:{} -> memory {:#x} offset {:#x} size {:#x} ends {:#x}",
+             image_ci.extent.width, image_ci.extent.height, image_ci.extent.depth,
+             vk::to_string(image_ci.format), image_ci.arrayLayers, image_ci.mipLevels,
+             reinterpret_cast<u64>(where.deviceMemory), where.offset, where.size,
+             where.offset + where.size);
 }
 
 Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
@@ -823,6 +835,15 @@ void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::Subresourc
     scheduler->EndRendering();
     Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {});
     const auto cmdbuf = scheduler->CommandBuffer();
+    const auto& clear_ci = backing->image.image_ci;
+    if (range.base.level + range.extent.levels > clear_ci.mipLevels ||
+        range.base.layer + range.extent.layers > clear_ci.arrayLayers) {
+        LOG_ERROR(Render_Vulkan,
+                  "Clear: range outside the image. the image has {} levels and {} layers | asked "
+                  "for levels {}+{} layers {}+{}",
+                  clear_ci.mipLevels, clear_ci.arrayLayers, range.base.level, range.extent.levels,
+                  range.base.layer, range.extent.layers);
+    }
     cmdbuf.clearColorImage(GetImage(), vk::ImageLayout::eTransferDstOptimal, clear_value.color,
                            vk_range);
 }
