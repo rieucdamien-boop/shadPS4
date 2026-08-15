@@ -7,6 +7,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/blit_helper.h"
+#include "video_core/texture_cache/copy_bounds.h"
 #include "video_core/texture_cache/image.h"
 
 #include <vk_mem_alloc.h>
@@ -386,6 +387,10 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
         .imageMemoryBarrierCount = static_cast<u32>(image_barriers.size()),
         .pImageMemoryBarriers = image_barriers.data(),
     });
+    for (const auto& c : upload_copies) {
+        CopyRegionFits("Upload", "dst", backing->image.image_ci, c.imageSubresource, c.imageOffset,
+                       c.imageExtent);
+    }
     cmdbuf.copyBufferToImage(buffer, GetImage(), vk::ImageLayout::eTransferDstOptimal,
                              upload_copies);
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
@@ -432,6 +437,10 @@ void Image::Download(std::span<const vk::BufferImageCopy> download_copies, vk::B
         .imageMemoryBarrierCount = static_cast<u32>(image_barriers.size()),
         .pImageMemoryBarriers = image_barriers.data(),
     });
+    for (const auto& c : download_copies) {
+        CopyRegionFits("Download", "src", backing->image.image_ci, c.imageSubresource, c.imageOffset,
+                       c.imageExtent);
+    }
     cmdbuf.copyImageToBuffer(GetImage(), vk::ImageLayout::eTransferSrcOptimal, buffer,
                              download_copies);
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
@@ -577,6 +586,14 @@ void Image::CopyImage(Image& src_image) {
             region.extent = vk::Extent3D(mip_w, mip_h, dst_layers);
         }
 
+        if (!CopyRegionFits("CopyImage", "src", src_image.backing->image.image_ci,
+                            region.srcSubresource, region.srcOffset, region.extent)) {
+            continue;
+        }
+        if (!CopyRegionFits("CopyImage", "dst", backing->image.image_ci, region.dstSubresource,
+                            region.dstOffset, region.extent)) {
+            continue;
+        }
         regions.push_back(region);
     }
 
@@ -668,6 +685,10 @@ void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset)
 
     for (auto& copy : buffer_copies) {
         copy.imageSubresource.aspectMask = aspect_mask & ~vk::ImageAspectFlagBits::eStencil;
+        CopyRegionFits("CopyImageWithBuffer", "src", src_image.backing->image.image_ci,
+                       copy.imageSubresource, copy.imageOffset, copy.imageExtent);
+        CopyRegionFits("CopyImageWithBuffer", "dst", backing->image.image_ci,
+                       copy.imageSubresource, copy.imageOffset, copy.imageExtent);
     }
 
     cmdbuf.copyBufferToImage(buffer, GetImage(), vk::ImageLayout::eTransferDstOptimal,
@@ -715,6 +736,10 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
     src_image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
 
     const auto cmdbuf = scheduler->CommandBuffer();
+    CopyRegionFits("CopyMip", "src", src_image.backing->image.image_ci, image_copy.srcSubresource,
+                   image_copy.srcOffset, image_copy.extent);
+    CopyRegionFits("CopyMip", "dst", backing->image.image_ci, image_copy.dstSubresource,
+                   image_copy.dstOffset, image_copy.extent);
     cmdbuf.copyImage(src_image.GetImage(), src_image.backing->state.layout, GetImage(),
                      backing->state.layout, image_copy);
     Transit(vk::ImageLayout::eGeneral,
@@ -749,6 +774,10 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
             .dstOffset = {0, 0, 0},
             .extent = {info.size.width, info.size.height, 1},
         };
+        CopyRegionFits("Resolve", "src", src_image.backing->image.image_ci,
+                       region.srcSubresource, region.srcOffset, region.extent);
+        CopyRegionFits("Resolve", "dst", backing->image.image_ci, region.dstSubresource,
+                       region.dstOffset, region.extent);
         scheduler->CommandBuffer().copyImage(src_image.GetImage(),
                                              vk::ImageLayout::eTransferSrcOptimal, GetImage(),
                                              vk::ImageLayout::eTransferDstOptimal, region);
@@ -770,6 +799,10 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
             .dstOffset = {0, 0, 0},
             .extent = {info.size.width, info.size.height, 1},
         };
+        CopyRegionFits("ResolveMs", "src", src_image.backing->image.image_ci,
+                       region.srcSubresource, region.srcOffset, region.extent);
+        CopyRegionFits("ResolveMs", "dst", backing->image.image_ci, region.dstSubresource,
+                       region.dstOffset, region.extent);
         scheduler->CommandBuffer().resolveImage(src_image.GetImage(),
                                                 vk::ImageLayout::eTransferSrcOptimal, GetImage(),
                                                 vk::ImageLayout::eTransferDstOptimal, region);
